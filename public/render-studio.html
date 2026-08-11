@@ -1,0 +1,1986 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>StreamRadar — Render Studio</title>
+<style>
+/* ════════════════════════════════════════════════════
+   TOKENS + RESET
+════════════════════════════════════════════════════ */
+:root {
+  --bg:      #080b0f;
+  --surf:    #111720;
+  --surf2:   #1a2330;
+  --border:  #1e2d3d;
+  --green:   #53fc18;
+  --gdim:    #1c5208;
+  --blue:    #29b6f6;
+  --red:     #ef4444;
+  --orange:  #f59e0b;
+  --text:    #dde4ee;
+  --muted:   #556070;
+  --r:       8px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: var(--bg); color: var(--text);
+  min-height: 100vh; overflow-x: hidden;
+}
+
+/* ════════════════════════════════════════════════════
+   TOPBAR
+════════════════════════════════════════════════════ */
+.topbar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; height: 50px;
+  background: var(--surf); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 200;
+}
+.topbar-brand { font-weight: 800; font-size: .93rem; color: var(--green); flex: 1; }
+.btn-sm {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--surf2); border: 1px solid var(--border);
+  color: var(--text); padding: 6px 13px;
+  border-radius: var(--r); font-size: .78rem; cursor: pointer;
+  text-decoration: none; transition: background .15s, border-color .15s;
+  white-space: nowrap;
+}
+.btn-sm:hover { background: #1d2e40; border-color: var(--green); }
+
+/* Banner de exportación en 2do plano (sticky, visible aunque cambies de pestaña y vuelvas) */
+.bg-export-banner {
+  display: none; align-items: center; gap: 8px;
+  background: rgba(83,252,24,.08); border-bottom: 1px solid var(--green);
+  color: var(--green); font-size: .74rem; padding: 6px 16px;
+}
+.bg-export-banner.vis { display: flex; }
+.bg-export-banner .dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--green); animation: pulse 1.1s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+/* ════════════════════════════════════════════════════
+   STUDIO LAYOUT  (panel izq + preview der)
+════════════════════════════════════════════════════ */
+.studio {
+  display: grid;
+  grid-template-columns: minmax(300px, 420px) 1fr;
+  height: calc(100vh - 50px);
+}
+
+/* ── PANEL CONTROLES ──
+   Estructura fija: el panel completo NUNCA scrollea como
+   bloque. Se divide en una zona superior scrollable
+   (carga + ajustes + formato) y un pie fijo (exportar)
+   que siempre queda visible sin necesidad de scroll. */
+.panel-ctrl {
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--border);
+  height: 100%;
+  overflow: hidden;
+}
+.panel-ctrl-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 14px 10px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.panel-ctrl-footer {
+  flex: 0 0 auto;
+  padding: 12px 14px 14px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surf);
+  display: flex; flex-direction: column; gap: 10px;
+}
+
+/* Dropzone */
+.dz {
+  border: 2px dashed var(--green);
+  border-radius: var(--r); padding: 20px;
+  text-align: center; cursor: pointer;
+  background: rgba(83,252,24,.03);
+  transition: background .2s;
+}
+.dz:hover, .dz.over { background: rgba(83,252,24,.08); }
+.dz .dz-icon { font-size: 1.8rem; margin-bottom: 5px; display: block; }
+.dz .dz-text { font-size: .82rem; color: var(--muted); }
+.dz .dz-text strong { color: var(--green); }
+.dz input { display: none; }
+
+/* Section */
+.sec {
+  background: var(--surf); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 13px;
+  display: flex; flex-direction: column; gap: 9px;
+}
+.sec-title {
+  font-size: .68rem; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--green); font-weight: 700;
+  margin-bottom: 2px;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.sec-title .hint-icon {
+  color: var(--muted); cursor: help; text-transform: none; letter-spacing: 0;
+  font-weight: 400; font-size: .72rem;
+}
+
+/* Field */
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field label { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.field input[type=text],
+.field select {
+  background: var(--surf2); border: 1px solid var(--border);
+  color: var(--text); padding: 7px 9px;
+  border-radius: 6px; font-size: .83rem; width: 100%;
+}
+.field input[type=text]:focus,
+.field select:focus { outline: none; border-color: var(--green); }
+
+/* Checkbox */
+.chk {
+  display: flex; align-items: center; gap: 7px;
+  font-size: .82rem; cursor: pointer;
+}
+.chk input { width: 15px; height: 15px; accent-color: var(--green); cursor: pointer; }
+
+/* ── SELECTOR DE FORMATO (cards) ── */
+.fmt-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 7px;
+}
+.fmt-card {
+  position: relative;
+  background: var(--surf2); border: 1.5px solid var(--border);
+  border-radius: var(--r); padding: 9px 8px;
+  cursor: pointer; text-align: left;
+  display: flex; flex-direction: column; gap: 3px;
+  transition: border-color .15s, background .15s;
+}
+.fmt-card input { position: absolute; opacity: 0; pointer-events: none; }
+.fmt-card:hover { border-color: #2b4058; }
+.fmt-card.active { border-color: var(--green); background: rgba(83,252,24,.06); }
+.fmt-card .fc-icon { font-size: 1.15rem; }
+.fmt-card .fc-label { font-size: .76rem; font-weight: 700; color: var(--text); }
+.fmt-card .fc-desc { font-size: .64rem; color: var(--muted); line-height: 1.25; }
+.fmt-card.active .fc-label { color: var(--green); }
+
+/* Slider row del split (solo formatos de doble zona) */
+.split-row { display: flex; align-items: center; gap: 7px; font-size: .77rem; }
+.split-row label { color: var(--muted); min-width: 90px; }
+.split-row input[type=range] { flex: 1; accent-color: var(--blue); }
+.split-row .sv { font-family: monospace; font-size: .74rem; color: var(--blue); min-width: 38px; text-align: right; }
+
+/* ── EXPORT SECTION ── */
+.res-toggle { display: flex; gap: 6px; }
+.res-toggle button {
+  flex: 1; padding: 8px 6px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surf2);
+  color: var(--text); font-size: .74rem; cursor: pointer;
+}
+.res-toggle button.active { border-color: var(--green); color: var(--green); background: rgba(83,252,24,.07); }
+.res-note { font-size: .66rem; color: var(--muted); }
+
+.btn-export {
+  width: 100%; padding: 13px;
+  background: var(--green); color: #000;
+  border: none; border-radius: var(--r);
+  font-size: .92rem; font-weight: 800;
+  cursor: pointer; text-transform: uppercase; letter-spacing: .5px;
+  transition: opacity .15s; position: relative;
+}
+.btn-export:hover  { opacity: .88; }
+.btn-export:disabled { background: var(--gdim); color: #2a5010; cursor: not-allowed; opacity: 1; }
+
+/* Barra de progreso */
+.prog-wrap {
+  display: none; flex-direction: column; gap: 5px;
+}
+.prog-wrap.visible { display: flex; }
+.prog-bar-track {
+  width: 100%; height: 8px;
+  background: var(--surf2); border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--border);
+}
+.prog-bar-fill {
+  height: 100%; width: 0%;
+  background: var(--green);
+  border-radius: 4px;
+  transition: width .25s linear;
+}
+.prog-label {
+  display: flex; justify-content: space-between;
+  font-size: .72rem; color: var(--muted); font-family: monospace;
+}
+
+/* Status + error */
+.status-box {
+  display: none; padding: 9px 11px;
+  border-radius: var(--r); font-size: .8rem;
+  border: 1px solid; word-break: break-word;
+}
+.status-box.ok    { background: rgba(83,252,24,.07);  border-color: var(--green);  color: var(--green);  display: block; }
+.status-box.err   { background: rgba(239,68,68,.08);  border-color: var(--red);    color: var(--red);    display: block; }
+.status-box.info  { background: rgba(41,182,246,.07); border-color: var(--blue);   color: var(--blue);   display: block; }
+.status-box.warn  { background: rgba(245,158,11,.07); border-color: var(--orange); color: var(--orange); display: block; }
+
+/* Botón descargar (aparece cuando hay blob) */
+.btn-dl {
+  display: none; width: 100%; padding: 11px;
+  background: var(--surf2); border: 1px solid var(--green);
+  color: var(--green); border-radius: var(--r);
+  font-size: .85rem; font-weight: 700; cursor: pointer;
+  transition: background .15s;
+}
+.btn-dl:hover { background: rgba(83,252,24,.08); }
+.btn-dl.vis { display: block; }
+
+.btn-share {
+  display: none; width: 100%; padding: 11px;
+  background: var(--surf2); border: 1px solid var(--blue);
+  color: var(--blue); border-radius: var(--r);
+  font-size: .85rem; font-weight: 700; cursor: pointer;
+  transition: background .15s;
+}
+.btn-share:hover { background: rgba(41,182,246,.1); }
+.btn-share.vis { display: block; }
+
+/* ── PANEL PREVIEW ── */
+.panel-prev {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: flex-start;
+  padding: 18px 14px; gap: 10px;
+  background: #060810;
+  overflow-y: auto;
+}
+.prev-label { font-size: .72rem; color: var(--muted); text-align: center; }
+
+.prev-controls {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+}
+.prev-time { font-family: monospace; font-size: .72rem; color: var(--muted); }
+
+/* ── TRIM BAR (recorte de entrada/salida) ── */
+.trim-wrap {
+  width: 100%; max-width: 420px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.trim-track {
+  position: relative; height: 34px;
+  background: var(--surf2); border: 1px solid var(--border);
+  border-radius: 6px; cursor: pointer;
+  touch-action: none;
+}
+.trim-range {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(83,252,24,.22); border-top: 1px solid var(--green); border-bottom: 1px solid var(--green);
+  pointer-events: none;
+}
+.trim-handle {
+  position: absolute; top: -1px; bottom: -1px; width: 14px;
+  background: var(--green); border-radius: 4px; cursor: ew-resize;
+  transform: translateX(-50%);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px rgba(0,0,0,.4);
+  touch-action: none; z-index: 2;
+}
+.trim-handle::after {
+  content: ''; width: 2px; height: 14px; background: rgba(0,0,0,.5); border-radius: 1px;
+}
+.trim-playhead {
+  position: absolute; top: -3px; bottom: -3px; width: 2px;
+  background: #fff; pointer-events: none; z-index: 1;
+}
+.trim-labels {
+  display: flex; justify-content: space-between;
+  font-size: .68rem; color: var(--muted); font-family: monospace;
+}
+.trim-labels .trim-dur { color: var(--green); font-weight: 700; }
+.trim-actions { display: flex; gap: 6px; }
+.trim-actions button {
+  flex: 1; font-size: .68rem; padding: 6px 4px;
+}
+
+/* Marco 9:16 que se adapta a la altura disponible */
+.frame-9x16 {
+  position: relative;
+  height: min(calc(100vh - 130px), 640px);
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid var(--border);
+  box-shadow: 0 6px 28px rgba(0,0,0,.7);
+  cursor: crosshair;
+  flex-shrink: 0;
+}
+#render-canvas {
+  width: 100%; height: 100%;
+  display: block; touch-action: none;
+}
+
+/* Línea guía de la zona activa (solo formatos dobles) */
+.zone-guide {
+  position: absolute; left: 0; width: 100%;
+  border-top: 2px dashed rgba(83,252,24,.65);
+  pointer-events: none; display: none;
+}
+.zone-guide.vis { display: block; }
+.zone-tag {
+  position: absolute; left: 8px;
+  background: rgba(0,0,0,.6); color: var(--green);
+  font-size: .6rem; padding: 2px 7px; border-radius: 20px;
+  pointer-events: none; font-weight: 700; letter-spacing: .3px;
+}
+
+/* Overlay de hint */
+.frame-hint {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 8px;
+  color: var(--muted); font-size: .8rem;
+  pointer-events: none; text-align: center; padding: 20px;
+}
+.frame-hint .h-icon { font-size: 2rem; }
+.frame-hint.hidden { display: none; }
+
+/* Cursor hint — arriba (para no tapar el overlay inferior del clip)
+   y con más opacidad para que se lea bien; se difumina sola tras
+   la primera interacción o a los pocos segundos para no molestar. */
+.drag-hint {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.82); color: rgba(255,255,255,.92);
+  font-size: .62rem; padding: 4px 10px; border-radius: 20px;
+  pointer-events: none; white-space: nowrap;
+  transition: opacity .4s ease; z-index: 5;
+}
+.drag-hint.faded { opacity: 0; }
+
+/* ════════════════════════════════════════════════════
+   RESPONSIVE
+════════════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .studio { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 50px); }
+  .panel-ctrl { border-right: none; border-bottom: 1px solid var(--border); height: auto; max-height: 62vh; }
+  .panel-prev { min-height: 420px; }
+  .frame-9x16 { height: min(calc(100vw * 16/9 * 0.65), 520px); }
+}
+@media (max-width: 480px) {
+  .panel-ctrl-scroll { padding: 11px 11px 8px 11px; }
+  .panel-ctrl-footer { padding: 10px 11px 12px 11px; }
+  .frame-9x16 { height: min(70vw * 16/9, 440px); }
+  .fmt-grid { grid-template-columns: 1fr 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-brand">📹 RENDER STUDIO</div>
+  <a class="btn-sm" href="index.html">← Dashboard</a>
+</div>
+
+<!-- Aviso persistente mientras se exporta en 2do plano -->
+<div class="bg-export-banner" id="bg-export-banner">
+  <span class="dot"></span>
+  <span id="bg-export-text">Exportando… puedes cambiar de pestaña, el proceso continúa en segundo plano.</span>
+</div>
+
+<!-- Video fuente oculto — OJO: NO usar display:none.
+     Los navegadores suspenden la decodificación de un <video>
+     con display:none de forma mucho más agresiva en cuanto la
+     pestaña pasa a segundo plano (solo el audio sigue sonando y
+     el frame queda congelado — el bug que causaba exportar una
+     imagen fija con audio). Al posicionarlo fuera de pantalla
+     pero "visible" para el motor de render, la decodificación
+     se mantiene activa igual que la de cualquier <video> normal. -->
+<video id="src-video"
+       style="position:fixed; left:-99999px; top:0; width:2px; height:2px; opacity:0.01; pointer-events:none;"
+       playsinline preload="auto"></video>
+
+<div class="studio">
+
+  <!-- ═══════ PANEL CONTROLES ═══════ -->
+  <div class="panel-ctrl">
+
+    <!-- Zona scrollable: carga + ajustes + formato -->
+    <div class="panel-ctrl-scroll">
+
+      <!-- 1. CARGAR VIDEO -->
+      <label class="dz" id="dropzone">
+        <span class="dz-icon">📁</span>
+        <div class="dz-text">
+          <strong>Cargar clip MP4/MOV</strong><br>
+          Arrastra aquí o toca para seleccionar
+        </div>
+        <input type="file" id="file-input" accept="video/*">
+      </label>
+
+      <!-- 2. AJUSTES DEL CLIP -->
+      <div class="sec">
+        <div class="sec-title">🛠 Ajustes del clip</div>
+
+        <div class="field">
+          <label>Nombre del streamer</label>
+          <input type="text" id="txt-streamer" value="daarick" placeholder="ej: daarick">
+        </div>
+
+        <div class="field">
+          <label>Título / Caption del clip</label>
+          <input type="text" id="txt-title" value="MOMENTO VIRAL DEL STREAM">
+        </div>
+
+        <div class="field">
+          <label>Título / Caption para TikTok</label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="txt-tiktok-title" placeholder="Se resuelve al recibir el análisis...">
+            <button type="button" class="btn-sm" id="btn-copy-tiktok" title="Copiar">📋</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Hashtags</label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="txt-hashtags" placeholder="Se resuelve al recibir el análisis...">
+            <button type="button" class="btn-sm" id="btn-copy-hashtags" title="Copiar">📋</button>
+          </div>
+        </div>
+
+        <label class="chk">
+          <input type="checkbox" id="chk-badge" checked>
+          Mostrar KICK + nombre del streamer
+        </label>
+
+        <label class="chk">
+          <input type="checkbox" id="chk-banner" checked>
+          Mostrar banner del streamer (imagen inferior)
+        </label>
+
+        <label class="chk">
+          <input type="checkbox" id="chk-title" checked>
+          Mostrar título / caption
+        </label>
+
+        <label class="chk">
+          <input type="checkbox" id="chk-logo" checked>
+          Marca de agua StreamRadar
+        </label>
+      </div>
+
+      <!-- 3. FORMATO -->
+      <div class="sec">
+        <div class="sec-title">🎬 Formato de render</div>
+        <div class="fmt-grid" id="fmt-grid"><!-- cards inyectadas por JS --></div>
+        <div class="sl-hint" id="fmt-desc"></div>
+
+        <!-- Proporción del split — solo aplica a formatos de doble zona.
+             El reencuadre/zoom/posición se maneja directamente arrastrando
+             y con la rueda/pinch sobre el preview, no hace falta un panel
+             aparte para eso. -->
+        <div class="split-row" id="split-row" style="display:none">
+          <label>Proporción split</label>
+          <input type="range" id="sl-split" min="20" max="80" value="50">
+          <span class="sv" id="sv-split">50%</span>
+        </div>
+
+        <!-- Preset de encuadre por streamer: guarda zoom/posición de las
+             zonas + layout en el servidor, para no tener que reajustar a
+             mano cada vez que aparece un clip del mismo streamer. -->
+        <div class="field" style="margin-top:10px;">
+          <div style="display:flex; gap:6px;">
+            <button type="button" class="btn-sm" id="btn-save-preset" style="flex:1">
+              💾 Guardar posición
+            </button>
+            <button type="button" class="btn-sm" id="btn-reset-preset" title="Volver al encuadre por defecto">
+              ↺
+            </button>
+          </div>
+          <div class="sl-hint" id="preset-status" style="margin-top:4px;"></div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Pie fijo: siempre visible, sin necesidad de hacer scroll -->
+    <div class="panel-ctrl-footer">
+      <div class="sec-title" style="margin-bottom:0">📤 Exportar</div>
+
+      <div class="field">
+        <label>Resolución de salida</label>
+        <div class="res-toggle">
+          <button type="button" data-res="1080" class="active">1080×1920 (HD)</button>
+          <button type="button" data-res="720">720×1280 (rápido)</button>
+        </div>
+      </div>
+
+      <button class="btn-export" id="btn-export" disabled>
+        ▶ Exportar clip vertical
+      </button>
+
+      <!-- Barra de progreso -->
+      <div class="prog-wrap" id="prog-wrap">
+        <div class="prog-bar-track">
+          <div class="prog-bar-fill" id="prog-fill"></div>
+        </div>
+        <div class="prog-label">
+          <span id="prog-pct">0%</span>
+          <span id="prog-time">0s / 0s</span>
+        </div>
+      </div>
+
+      <!-- Status / error -->
+      <div class="status-box" id="status-box"></div>
+
+      <!-- Botón descarga manual -->
+      <button class="btn-dl" id="btn-dl">⬇ Descargar clip</button>
+
+      <!-- Botón compartir móvil -->
+      <button class="btn-share" id="btn-share">📲 Compartir (iOS/Android)</button>
+    </div>
+
+  </div>
+
+  <!-- ═══════ PANEL PREVIEW ═══════ -->
+  <div class="panel-prev">
+    <div class="prev-label">Preview 9:16 · Arrastra para reencuadrar · Rueda = zoom</div>
+    <div class="frame-9x16" id="frame-wrap">
+      <canvas id="render-canvas" width="1080" height="1920"></canvas>
+      <div class="zone-guide" id="zone-guide"></div>
+      <div class="zone-tag" id="zone-tag-a" style="top:6px">ZONA A</div>
+      <div class="zone-tag" id="zone-tag-b" style="display:none">ZONA B</div>
+      <div class="frame-hint" id="frame-hint">
+        <span class="h-icon">📽</span>
+        <span>Carga un video para ver el preview</span>
+      </div>
+      <div class="drag-hint" id="drag-hint">🖱 arrastrar · 🔍 rueda/pinch</div>
+    </div>
+    <div class="prev-controls" id="prev-controls">
+      <button type="button" class="btn-sm" id="btn-playpause" disabled>▶ Reproducir</button>
+      <span class="prev-time" id="prev-time">0:00 / 0:00</span>
+    </div>
+
+    <div class="trim-wrap" id="trim-wrap">
+      <div class="trim-track" id="trim-track">
+        <div class="trim-range" id="trim-range"></div>
+        <div class="trim-playhead" id="trim-playhead"></div>
+        <div class="trim-handle" id="trim-handle-start" data-handle="start"></div>
+        <div class="trim-handle" id="trim-handle-end" data-handle="end"></div>
+      </div>
+      <div class="trim-labels">
+        <span id="trim-start-label">Inicio: 0:00</span>
+        <span class="trim-dur" id="trim-dur-label">Duración: 0:00</span>
+        <span id="trim-end-label">Fin: 0:00</span>
+      </div>
+      <div class="trim-actions">
+        <button type="button" class="btn-sm" id="btn-mark-start" disabled>⏱ Marcar inicio aquí</button>
+        <button type="button" class="btn-sm" id="btn-mark-end" disabled>⏱ Marcar fin aquí</button>
+        <button type="button" class="btn-sm" id="btn-reset-trim" disabled>↺ Todo el clip</button>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /studio -->
+
+<script>
+/* ═══════════════════════════════════════════════════════
+   FORMATOS DE RENDER
+   ──────────────────────────────────────────────────────
+   single  → 1 sola región de video (fill = recorte centro,
+             blur = clip completo con fondo difuminado,
+             casino = solo cámara del streamer, sin gameplay)
+   dual    → 2 regiones independientes apiladas (zona A arriba,
+             zona B abajo), cada una con su propio zoom/pan.
+             Útil para podcast, entrevistas y clips de streamer
+             (cam arriba + gameplay abajo, como en Twitch/Kick).
+
+   El reencuadre (zoom / posición) de cada zona se ajusta
+   directamente arrastrando el preview o con rueda/pinch —
+   no hay sliders separados para esto, se maneja todo "a mano"
+   sobre el video.
+
+   Todas las coordenadas están en el espacio de canvas 1080×1920.
+═══════════════════════════════════════════════════════ */
+const LAYOUTS = {
+  fill: {
+    label: 'Vertical', icon: '🖼️', mode: 'single', crop: 'cover',
+    desc: 'Recorta el centro del clip para llenar todo el frame vertical. Ideal si lo importante ya está centrado.',
+    videoZoneH: 1920, bottom: { titleBarY: 1555, titleBarH: 70, badgeY: 1640, bannerY: 1700, bannerH: 220 }
+  },
+  blur: {
+    label: 'Full Frame', icon: '🌫️', mode: 'single', crop: 'contain-blur',
+    desc: 'Muestra el clip completo (sin recortar nada) con fondo difuminado arriba y abajo.',
+    videoZoneH: 1580, bottom: { titleBarY: 1550, titleBarH: 70, badgeY: 1630, bannerY: 1665, bannerH: 255 }
+  },
+  casino: {
+    label: 'Casino', icon: '🎰', mode: 'single', crop: 'cover',
+    desc: 'Muestra solo la cámara del streamer (oculta el gameplay) — para plataformas donde no está permitido mostrar contenido de casino/apuestas.',
+    videoZoneH: 1920, bottom: { titleBarY: 1555, titleBarH: 70, badgeY: 1640, bannerY: 1700, bannerH: 220 }
+  },
+  podcast: {
+    label: 'Podcast', icon: '🎙️', mode: 'dual', dualStyle: 'even',
+    desc: 'Divide el clip en dos mitades apilabas — perfecto para clips de 2 invitados en cámara.',
+    videoZoneH: 1920, defaultSplit: 50, bottom: { titleBarY: 1555, titleBarH: 70, badgeY: 1640, bannerY: 1700, bannerH: 220 }
+  },
+  interview: {
+    label: 'Entrevista', icon: '🎤', mode: 'dual', dualStyle: 'labeled',
+    desc: 'Dos zonas ajustables con más peso arriba — ideal para entrevistador / invitado.',
+    videoZoneH: 1920, defaultSplit: 55, bottom: { titleBarY: 1555, titleBarH: 70, badgeY: 1640, bannerY: 1700, bannerH: 220 }
+  },
+  streamer: {
+    label: 'Streamer Cam', icon: '🎮', mode: 'dual', dualStyle: 'cam',
+    desc: 'Cam del streamer arriba (más pequeña) + gameplay abajo — el formato clásico de clips de Twitch/Kick.',
+    videoZoneH: 1920, defaultSplit: 32, bottom: { titleBarY: 1555, titleBarH: 70, badgeY: 1640, bannerY: 1700, bannerH: 220 }
+  },
+};
+
+let currentLayoutKey = 'streamer';
+
+/* ═══════════════════════════════════════════════════════
+   FUENTE + IMÁGENES
+═══════════════════════════════════════════════════════ */
+const customFont = new FontFace('Anton', 'url(assets/fonts/Anton-Regular.ttf)');
+customFont.load()
+  .then(f => { document.fonts.add(f); requestRedraw(); })
+  .catch(() => {});
+
+const FONT = `'Anton', Impact, Arial Black, sans-serif`;
+
+const logoImg   = new Image();
+logoImg.src     = 'assets/logos/streamradar_logo.png';
+logoImg.onload  = requestRedraw;
+
+const bannerImg = new Image();
+bannerImg.onerror = () => { bannerImg._failed = true; requestRedraw(); };
+bannerImg.onload  = requestRedraw;
+
+/* ═══════════════════════════════════════════════════════
+   REFS DOM
+═══════════════════════════════════════════════════════ */
+const video       = document.getElementById('src-video');
+const canvas      = document.getElementById('render-canvas');
+const ctx         = canvas.getContext('2d');
+const fileInput   = document.getElementById('file-input');
+const dropzone    = document.getElementById('dropzone');
+const txtStreamer = document.getElementById('txt-streamer');
+const txtTitle    = document.getElementById('txt-title');
+const txtTiktok   = document.getElementById('txt-tiktok-title');
+const txtHashtags = document.getElementById('txt-hashtags');
+const btnCopyTiktok   = document.getElementById('btn-copy-tiktok');
+const btnCopyHashtags = document.getElementById('btn-copy-hashtags');
+const fmtGrid     = document.getElementById('fmt-grid');
+const fmtDesc     = document.getElementById('fmt-desc');
+const chkBadge    = document.getElementById('chk-badge');
+const chkBanner   = document.getElementById('chk-banner');
+const chkTitle    = document.getElementById('chk-title');
+const chkLogo     = document.getElementById('chk-logo');
+const splitRow    = document.getElementById('split-row');
+const btnSavePreset  = document.getElementById('btn-save-preset');
+const btnResetPreset = document.getElementById('btn-reset-preset');
+const presetStatus   = document.getElementById('preset-status');
+
+// Mismo servidor que sirve esta página (api.py) — se adapta solo a
+// localhost o a la IP de tu PC si lo abrís desde el celular.
+const API_URL = window.location.origin;
+const slSplit     = document.getElementById('sl-split');
+const svSplit     = document.getElementById('sv-split');
+const btnExport   = document.getElementById('btn-export');
+const btnDl       = document.getElementById('btn-dl');
+const btnShare    = document.getElementById('btn-share');
+const progWrap    = document.getElementById('prog-wrap');
+const progFill    = document.getElementById('prog-fill');
+const progPct     = document.getElementById('prog-pct');
+const progTime    = document.getElementById('prog-time');
+const statusBox   = document.getElementById('status-box');
+const frameHint   = document.getElementById('frame-hint');
+const dragHint    = document.getElementById('drag-hint');
+const btnPlay     = document.getElementById('btn-playpause');
+const prevTime    = document.getElementById('prev-time');
+const trimTrack   = document.getElementById('trim-track');
+const trimRange   = document.getElementById('trim-range');
+const trimPlayhead= document.getElementById('trim-playhead');
+const trimHandleS = document.getElementById('trim-handle-start');
+const trimHandleE = document.getElementById('trim-handle-end');
+const trimStartLbl= document.getElementById('trim-start-label');
+const trimEndLbl  = document.getElementById('trim-end-label');
+const trimDurLbl  = document.getElementById('trim-dur-label');
+const btnMarkStart= document.getElementById('btn-mark-start');
+const btnMarkEnd  = document.getElementById('btn-mark-end');
+const btnResetTrim= document.getElementById('btn-reset-trim');
+const zoneGuide   = document.getElementById('zone-guide');
+const zoneTagA    = document.getElementById('zone-tag-a');
+const zoneTagB    = document.getElementById('zone-tag-b');
+const bgBanner    = document.getElementById('bg-export-banner');
+const bgBannerTxt = document.getElementById('bg-export-text');
+const resButtons  = document.querySelectorAll('.res-toggle button');
+
+/* ═══════════════════════════════════════════════════════
+   ESTADO
+═══════════════════════════════════════════════════════ */
+let animId         = null;
+let exportedBlob   = null;
+let recorder       = null;
+let chunks         = [];
+let isDragging     = false;
+let dragX          = 0, dragY = 0;
+let lastPinchDist  = null;
+let redrawPending  = false;
+let activeZone     = 'A';           // 'A' | 'B' — solo relevante en modo dual
+let exportResolution = 1080;        // 1080 | 720
+let wakeLockRef    = null;
+
+/* Reencuadre por zona. En formatos "single" solo se usa regions.A.
+   No hay UI de sliders para esto: se ajusta arrastrando el preview
+   (pan) y con la rueda del mouse / pinch (zoom). */
+let regions = {
+  A: { zoom: 10, x: 50, y: 50 },
+  B: { zoom: 10, x: 50, y: 50 },
+};
+let splitPct = 50; // % de altura asignado a la zona A (formatos dual)
+
+/* ── Recorte de entrada/salida (trim) ──
+   trimStart/trimEnd están en segundos, dentro de [0, video.duration].
+   Se usan tanto para acotar la reproducción del preview como para
+   limitar exactamente qué segmento se exporta. */
+let trimStart = 0;
+let trimEnd   = 0;
+let trimDragHandle = null; // 'start' | 'end' | null
+
+/* ═══════════════════════════════════════════════════════
+   SELECTOR DE FORMATO — cards
+═══════════════════════════════════════════════════════ */
+function buildFormatCards() {
+  fmtGrid.innerHTML = '';
+  Object.entries(LAYOUTS).forEach(([key, def]) => {
+    const card = document.createElement('label');
+    card.className = 'fmt-card' + (key === currentLayoutKey ? ' active' : '');
+    card.innerHTML = `
+      <input type="radio" name="fmt" value="${key}" ${key === currentLayoutKey ? 'checked' : ''}>
+      <span class="fc-icon">${def.icon}</span>
+      <span class="fc-label">${def.label}</span>
+    `;
+    card.addEventListener('click', () => selectLayout(key));
+    fmtGrid.appendChild(card);
+  });
+  fmtDesc.textContent = LAYOUTS[currentLayoutKey].desc;
+}
+
+function selectLayout(key) {
+  currentLayoutKey = key;
+  const def = LAYOUTS[key];
+  fmtDesc.textContent = def.desc;
+  [...fmtGrid.children].forEach(c => {
+    c.classList.toggle('active', c.querySelector('input').value === key);
+  });
+
+  const isDual = def.mode === 'dual';
+  splitRow.style.display = isDual ? 'flex' : 'none';
+  zoneGuide.classList.toggle('vis', isDual);
+  zoneTagB.style.display = isDual ? 'block' : 'none';
+
+  if (isDual) {
+    splitPct = def.defaultSplit ?? 50;
+    slSplit.value = splitPct;
+    svSplit.textContent = splitPct + '%';
+    activeZone = 'A';
+    updateZoneGuidePosition();
+  } else {
+    activeZone = 'A';
+  }
+  loadBannerForStreamer();
+  requestRedraw();
+}
+
+function updateZoneGuidePosition() {
+  // Posiciona la línea guía dentro del frame según el % de split actual
+  zoneGuide.style.top = splitPct + '%';
+  zoneTagB.style.top = `calc(${splitPct}% + 6px)`;
+}
+
+slSplit.addEventListener('input', () => {
+  splitPct = parseFloat(slSplit.value);
+  svSplit.textContent = splitPct + '%';
+  updateZoneGuidePosition();
+  requestRedraw();
+});
+
+/* Opciones del clip */
+[txtStreamer, txtTitle, chkBadge, chkBanner, chkTitle, chkLogo].forEach(el => {
+  el.addEventListener('input', () => {
+    loadBannerForStreamer();
+    requestRedraw();
+  });
+});
+
+/* Resolución de exportación */
+resButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    resButtons.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    exportResolution = parseInt(btn.dataset.res, 10);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════
+   BANNER DEL STREAMER
+═══════════════════════════════════════════════════════ */
+function loadBannerForStreamer() {
+  const name = txtStreamer.value.trim().toLowerCase();
+  if (!name) return;
+  bannerImg._failed = false;
+  bannerImg.src = `assets/banners/${name}.jpg`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   DRAG & DROP — ARCHIVO
+═══════════════════════════════════════════════════════ */
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('over'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault(); dropzone.classList.remove('over');
+  const f = e.dataTransfer?.files[0];
+  if (f && f.type.startsWith('video/')) loadFile(f);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+function loadFile(file) {
+  if (video._blobUrl) URL.revokeObjectURL(video._blobUrl);
+  const url  = URL.createObjectURL(file);
+  video._blobUrl = url;
+  video.src  = url;
+  video.load();
+
+  setStatus('info', '⏳ Cargando video…');
+
+  video.onloadedmetadata = () => {
+    btnExport.disabled = false;
+    btnPlay.disabled = false;
+    btnPlay.textContent = '▶ Reproducir';
+    prevTime.textContent = `0:00 / ${fmtDur(video.duration)}`;
+    btnMarkStart.disabled = false;
+    btnMarkEnd.disabled   = false;
+    btnResetTrim.disabled = false;
+    resetTrimToFull();
+    frameHint.classList.add('hidden');
+    loadBannerForStreamer();
+    video.currentTime = 0;
+
+    const durWarn = video.duration > 600
+      ? ' ⚠ Supera los 10 min máximos de TikTok.'
+      : (video.duration < 15 ? ' 💡 Clips de 15–60s suelen rendir mejor en el FYP.' : '');
+    setStatus('ok', `✅ Video listo · ${video.videoWidth}×${video.videoHeight} · ${fmtDur(video.duration)}${durWarn}`);
+
+    video.onseeked = () => {
+      requestRedraw();
+      video.onseeked = null;
+    };
+    startPreviewLoop();
+  };
+
+  video.onerror = () => {
+    setStatus('err', `❌ No se pudo cargar el video. Asegúrate de que sea MP4/MOV/WebM.`);
+  };
+}
+
+/* ═══════════════════════════════════════════════════════
+   RECEPCIÓN DE CLIP DESDE EL DASHBOARD (vía IndexedDB)
+   El dashboard (dashboard-clips-kick.html) guarda ahí el video +
+   los datos resueltos por Gemini (streamer, título overlay, título
+   TikTok, hashtags) cuando el usuario aprieta "Renderizar". Al
+   cargar esta página, revisamos si hay un payload pendiente y lo
+   consumimos (se borra después de leerlo, para no recargarlo de
+   nuevo en un refresh posterior sin querer).
+═══════════════════════════════════════════════════════ */
+function openRenderDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('streamradar_render_handoff', 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains('payload')) {
+        req.result.createObjectStore('payload');
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function consumePendingRenderPayload() {
+  try {
+    const db = await openRenderDB();
+    const payload = await new Promise((resolve, reject) => {
+      const tx = db.transaction('payload', 'readonly');
+      const req = tx.objectStore('payload').get('pending');
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    if (!payload) return; // no hay nada pendiente, comportamiento normal (drag&drop manual)
+
+    console.log('[render-studio] payload recibido:', {
+      streamer: payload.streamer,
+      title_overlay: payload.title_overlay,
+      title_tiktok: payload.title_tiktok,
+      hashtags: payload.hashtags,
+      blob_presente: !!payload.blob,
+      blob_size: payload.blob ? payload.blob.size : null,
+      blob_type: payload.blob ? payload.blob.type : null,
+    });
+
+    // Rellenamos los campos con los datos ya resueltos
+    if (payload.streamer) txtStreamer.value = payload.streamer;
+    if (payload.title_overlay) txtTitle.value = payload.title_overlay;
+    if (payload.title_tiktok) txtTiktok.value = payload.title_tiktok;
+    if (payload.hashtags && payload.hashtags.length) txtHashtags.value = payload.hashtags.join(' ');
+
+    // Si hay un preset de encuadre guardado para este streamer, lo aplicamos
+    // automáticamente (layout + zoom/posición de cámara) — así no hay que
+    // reajustar a mano cada vez que aparece un clip del mismo streamer.
+    if (payload.streamer) await loadStreamerPreset(payload.streamer, /*silent=*/true);
+
+    // Cargamos el video (loadFile acepta Blob igual que File)
+    if (payload.blob && payload.blob.size > 0) {
+      loadFile(payload.blob);
+    } else {
+      setStatus('err', '⚠️ Se recibieron los datos (título/hashtags) pero el video llegó vacío. '
+        + 'Vuelve al dashboard e intenta "Renderizar" de nuevo — revisa la consola (F12) por si el '
+        + 'proxy/CORS falló al descargar algún segmento del clip.');
+    }
+
+    loadBannerForStreamer();
+    requestRedraw();
+
+    // Borramos la entrada consumida para no recargarla en un refresh posterior
+    const db2 = await openRenderDB();
+    const delTx = db2.transaction('payload', 'readwrite');
+    delTx.objectStore('payload').delete('pending');
+
+  } catch (e) {
+    console.error('No se pudo leer el clip enviado desde el dashboard:', e);
+    // No es un error bloqueante: el usuario igual puede cargar el video a mano.
+  }
+}
+
+/* Copiar al portapapeles */
+function copyFieldToClipboard(input, btn) {
+  if (!input.value) return;
+  navigator.clipboard.writeText(input.value).then(() => {
+    const original = btn.textContent;
+    btn.textContent = '✅';
+    setTimeout(() => { btn.textContent = original; }, 900);
+  });
+}
+btnCopyTiktok?.addEventListener('click', () => copyFieldToClipboard(txtTiktok, btnCopyTiktok));
+btnCopyHashtags?.addEventListener('click', () => copyFieldToClipboard(txtHashtags, btnCopyHashtags));
+
+/* ═══════════════════════════════════════════════════════
+   PRESETS DE ENCUADRE POR STREAMER (guardados en el servidor)
+   Guarda/restaura layout + zoom/posición de cámara (regions.A/B +
+   splitPct) para no tener que reajustar a mano cada vez que aparece
+   un clip del mismo streamer. Se guarda en el servidor (no en
+   localStorage) para que se sincronice solo entre la PC y el celular.
+═══════════════════════════════════════════════════════ */
+async function saveStreamerPreset() {
+  const streamer = txtStreamer.value.trim();
+  if (!streamer) {
+    presetStatus.textContent = '⚠️ Poné el nombre del streamer primero.';
+    return;
+  }
+
+  const preset = {
+    layout: currentLayoutKey,
+    regionA: { ...regions.A },
+    regionB: { ...regions.B },
+    splitPct: splitPct,
+  };
+
+  btnSavePreset.disabled = true;
+  const original = btnSavePreset.textContent;
+  btnSavePreset.textContent = '⏳ Guardando...';
+
+  try {
+    const res = await fetch(`${API_URL}/streamer_presets/${encodeURIComponent(streamer)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(preset),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    presetStatus.textContent = `✅ Posición guardada para "${streamer}"`;
+  } catch (error) {
+    console.error('Error guardando preset:', error);
+    presetStatus.textContent = `❌ No se pudo guardar: ${error.message}`;
+  } finally {
+    btnSavePreset.disabled = false;
+    btnSavePreset.textContent = original;
+  }
+}
+
+async function loadStreamerPreset(streamerName, silent = false) {
+  const streamer = (streamerName || '').trim();
+  if (!streamer) return false;
+
+  try {
+    const res = await fetch(`${API_URL}/streamer_presets/${encodeURIComponent(streamer)}`);
+    if (res.status === 404) {
+      if (!silent) presetStatus.textContent = `No hay posición guardada para "${streamer}" todavía.`;
+      return false;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const preset = await res.json();
+
+    if (preset.layout && LAYOUTS[preset.layout]) {
+      selectLayout(preset.layout); // primero resetea splitPct/UI a los defaults del layout
+    }
+    if (preset.regionA) regions.A = { ...preset.regionA };
+    if (preset.regionB) regions.B = { ...preset.regionB };
+    if (typeof preset.splitPct === 'number') {
+      splitPct = preset.splitPct;
+      slSplit.value = splitPct;
+      svSplit.textContent = splitPct + '%';
+      updateZoneGuidePosition();
+    }
+    requestRedraw();
+
+    presetStatus.textContent = `📷 Posición de "${streamer}" aplicada automáticamente.`;
+    return true;
+  } catch (error) {
+    console.error('Error cargando preset:', error);
+    if (!silent) presetStatus.textContent = `❌ No se pudo cargar: ${error.message}`;
+    return false;
+  }
+}
+
+function resetToDefaultFraming() {
+  regions.A = { zoom: 10, x: 50, y: 50 };
+  regions.B = { zoom: 10, x: 50, y: 50 };
+  const def = LAYOUTS[currentLayoutKey];
+  if (def.mode === 'dual') {
+    splitPct = def.defaultSplit ?? 50;
+    slSplit.value = splitPct;
+    svSplit.textContent = splitPct + '%';
+    updateZoneGuidePosition();
+  }
+  requestRedraw();
+  presetStatus.textContent = '↺ Encuadre restablecido al valor por defecto.';
+}
+
+btnSavePreset?.addEventListener('click', saveStreamerPreset);
+btnResetPreset?.addEventListener('click', resetToDefaultFraming);
+
+// Búsqueda manual de preset si el usuario escribe el nombre del streamer a
+// mano (sin venir del dashboard) — se dispara al salir del campo de texto.
+txtStreamer?.addEventListener('blur', () => {
+  const name = txtStreamer.value.trim();
+  if (name) loadStreamerPreset(name, /*silent=*/false);
+});
+
+/* ═══════════════════════════════════════════════════════
+   CANVAS DRAG + ZOOM — desktop & mobile
+   La zona editada (A o B) se detecta automáticamente según
+   la posición vertical del puntero dentro del frame cuando
+   el formato activo es de doble zona.
+═══════════════════════════════════════════════════════ */
+function zoneFromPointerY(clientY) {
+  const def = LAYOUTS[currentLayoutKey];
+  if (def.mode !== 'dual') return 'A';
+  const rect = canvas.getBoundingClientRect();
+  const fracY = clamp((clientY - rect.top) / rect.height, 0, 1) * 100;
+  return fracY <= splitPct ? 'A' : 'B';
+}
+function setActiveZoneFromPointer(clientY) {
+  activeZone = zoneFromPointerY(clientY);
+}
+
+canvas.addEventListener('mousedown', e => {
+  isDragging = true; dragX = e.clientX; dragY = e.clientY;
+  setActiveZoneFromPointer(e.clientY);
+  canvas.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  applyDrag(e.clientX - dragX, e.clientY - dragY);
+  dragX = e.clientX; dragY = e.clientY;
+});
+window.addEventListener('mouseup', () => { isDragging = false; canvas.style.cursor = 'crosshair'; });
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  setActiveZoneFromPointer(e.clientY);
+  const r = regions[activeZone];
+  let z = r.zoom + (e.deltaY < 0 ? 2 : -2);
+  r.zoom = Math.max(10, Math.min(200, z));
+  requestRedraw();
+}, { passive: false });
+
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) {
+    isDragging = true; lastPinchDist = null;
+    dragX = e.touches[0].clientX;
+    dragY = e.touches[0].clientY;
+    setActiveZoneFromPointer(e.touches[0].clientY);
+  }
+  if (e.touches.length === 2) {
+    isDragging = false;
+    lastPinchDist = pinchDist(e.touches);
+  }
+}, { passive: true });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (e.touches.length === 1 && isDragging) {
+    applyDrag(e.touches[0].clientX - dragX, e.touches[0].clientY - dragY);
+    dragX = e.touches[0].clientX;
+    dragY = e.touches[0].clientY;
+  }
+  if (e.touches.length === 2 && lastPinchDist !== null) {
+    const d = pinchDist(e.touches);
+    const r = regions[activeZone];
+    let z = r.zoom + (d - lastPinchDist) * 0.25;
+    r.zoom = Math.max(10, Math.min(200, z));
+    lastPinchDist = d;
+    requestRedraw();
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => { isDragging = false; lastPinchDist = null; });
+
+function applyDrag(dx, dy) {
+  if (!video.videoWidth) return;
+  const r = regions[activeZone];
+  const sens = 0.25 * (r.zoom / 10);
+  let nx = r.x - dx * sens;
+  let ny = r.y - dy * sens;
+  r.x = clamp(nx, 0, 100);
+  r.y = clamp(ny, 0, 100);
+  requestRedraw();
+}
+function pinchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+function clamp(v, mn, mx) { return Math.max(mn, Math.min(mx, v)); }
+
+/* ═══════════════════════════════════════════════════════
+   DRAW FRAME — corazón del render
+═══════════════════════════════════════════════════════ */
+function requestRedraw() {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => { redrawPending = false; drawFrame(); });
+}
+
+function drawFrame() {
+  drawFrameToCtx(ctx, canvas.width, canvas.height, true);
+}
+
+/* drawFrameToCtx — dibuja la composición completa a cualquier
+   contexto/tamaño. Se usa tanto para el preview (1080×1920)
+   como para el canvas de exportación (1080×1920 o 720×1280). */
+function drawFrameToCtx(tCtx, W, H, isPreview) {
+  const key    = currentLayoutKey;
+  const def    = LAYOUTS[key];
+  const bottom = scaleBottom(def.bottom, W, H);
+  const name   = txtStreamer.value.trim().toUpperCase();
+  const title  = txtTitle.value.trim().toUpperCase();
+  const vW     = video.videoWidth  || 0;
+  const vH     = video.videoHeight || 0;
+  const hasVid = vW > 0 && vH > 0;
+
+  tCtx.fillStyle = '#000';
+  tCtx.fillRect(0, 0, W, H);
+
+  if (!hasVid) {
+    tCtx.fillStyle = '#0a0f15';
+    tCtx.fillRect(0, 0, W, H);
+    drawPlaceholderText(tCtx, W, H);
+    return;
+  }
+
+  const videoZoneH = Math.round(def.videoZoneH * (H / 1920));
+
+  if (def.mode === 'single' && def.crop === 'contain-blur') {
+    drawBlurZone(tCtx, W, H, videoZoneH, vW, vH, regions.A);
+  } else if (def.mode === 'single') {
+    drawCoverZone(tCtx, W, 0, videoZoneH, vW, vH, regions.A);
+  } else {
+    /* Doble zona */
+    const splitY = Math.round(videoZoneH * (splitPct / 100));
+    drawCoverZone(tCtx, W, 0, splitY, vW, vH, regions.A);
+    drawCoverZone(tCtx, W, splitY, videoZoneH - splitY, vW, vH, regions.B, splitY);
+
+    /* Separador + caption en el punto de división */
+    if (chkTitle.checked && title) {
+      drawDividerCaption(tCtx, W, splitY, title, H);
+    } else {
+      tCtx.save();
+      tCtx.strokeStyle = 'rgba(83,252,24,.55)';
+      tCtx.lineWidth = Math.max(1, Math.round(2 * (W / 1080)));
+      tCtx.setLineDash([Math.round(8*(W/1080)), Math.round(6*(W/1080))]);
+      tCtx.beginPath();
+      tCtx.moveTo(0, splitY);
+      tCtx.lineTo(W, splitY);
+      tCtx.stroke();
+      tCtx.restore();
+    }
+  }
+
+  /* ── Overlay inferior: título + badge + banner + logo ──
+     (sin degradado negro previo: se dibuja directo sobre el
+     video para no oscurecerlo antes de llegar a la barra) */
+
+  /* Título en la barra inferior — solo para formatos de 1 sola zona
+     (en formatos dual, el título ya se dibujó como caption central) */
+  if (def.mode === 'single') {
+    tCtx.fillStyle = 'rgba(0,0,0,0.9)';
+    tCtx.fillRect(0, bottom.titleBarY, W, bottom.titleBarH);
+
+    if (chkTitle.checked && title) {
+      tCtx.save();
+      let fs = Math.round(62 * (W / 1080));
+      const minFs = Math.round(30 * (W / 1080));
+      tCtx.font = `${fs}px ${FONT}`;
+      tCtx.textAlign = 'center';
+      tCtx.textBaseline = 'middle';
+      while (tCtx.measureText(title).width > W - 60 && fs > minFs) {
+        fs -= 2;
+        tCtx.font = `${fs}px ${FONT}`;
+      }
+      tCtx.shadowColor = 'rgba(0,0,0,0.9)';
+      tCtx.shadowBlur  = 8;
+      tCtx.fillStyle   = '#ffffff';
+      tCtx.fillText(title, W / 2, bottom.titleBarY + bottom.titleBarH / 2);
+      tCtx.restore();
+    }
+  }
+
+  if (chkBadge.checked) {
+    drawKickBadge(tCtx, W, bottom.badgeY, name);
+  }
+
+  /* Banner del streamer — respeta su propio checkbox.
+     El fallback (nombre sobre fondo oscuro) solo aparece si el
+     checkbox está activo pero la imagen falló. */
+  if (chkBanner.checked) {
+    if (!bannerImg._failed && bannerImg.complete && bannerImg.naturalWidth > 0) {
+      drawBannerStrip(tCtx, W, bottom.bannerY, bottom.bannerH);
+    } else {
+      tCtx.fillStyle = '#0b1420';
+      tCtx.fillRect(0, bottom.bannerY, W, bottom.bannerH);
+      tCtx.save();
+      const bfs = Math.round(48 * (W / 1080));
+      tCtx.font = `bold ${bfs}px ${FONT}`;
+      tCtx.fillStyle = '#53fc18';
+      tCtx.textAlign = 'center';
+      tCtx.textBaseline = 'middle';
+      tCtx.fillText(name, W / 2, bottom.bannerY + bottom.bannerH / 2);
+      tCtx.restore();
+    }
+  }
+
+  if (chkLogo.checked && logoImg.complete && logoImg.naturalWidth > 0) {
+    const ls = Math.round(90 * (W / 1080));
+    tCtx.drawImage(logoImg, W - ls - Math.round(20*(W/1080)), Math.round(20*(W/1080)), ls, ls);
+  }
+}
+
+function scaleBottom(b, W, H) {
+  const sy = H / 1920;
+  return {
+    titleBarY: Math.round(b.titleBarY * sy),
+    titleBarH: Math.round(b.titleBarH * sy),
+    badgeY:    Math.round(b.badgeY * sy),
+    bannerY:   Math.round(b.bannerY * sy),
+    bannerH:   Math.round(b.bannerH * sy),
+  };
+}
+
+/* ── Zona con recorte "cover" (llena el ancho completo, recorta sobrante) ── */
+function drawCoverZone(tCtx, W, zoneY, zoneH, vW, vH, region, yOffset) {
+  if (zoneH <= 0) return;
+  const zoom = region.zoom / 10;
+  const pX   = region.x / 100;
+  const pY   = region.y / 100;
+  const sc   = Math.max(W / vW, zoneH / vH) * zoom;
+  const dW   = vW * sc, dH = vH * sc;
+  const dX   = (W - dW) * pX;
+  const dY   = zoneY + (zoneH - dH) * pY;
+  tCtx.save();
+  tCtx.beginPath();
+  tCtx.rect(0, zoneY, W, zoneH);
+  tCtx.clip();
+  tCtx.drawImage(video, dX, dY, dW, dH);
+  tCtx.restore();
+}
+
+/* ── Zona "contain + blur" (clip completo, fondo difuminado) ── */
+function drawBlurZone(tCtx, W, H, zoneH, vW, vH, region) {
+  const zoom = region.zoom / 10;
+  const pX   = region.x / 100;
+  const pY   = region.y / 100;
+
+  tCtx.save();
+  tCtx.filter = 'blur(14px) brightness(0.3) saturate(1.5)';
+  const scBg = Math.max(W / vW, H / vH);
+  tCtx.drawImage(video, (W - vW*scBg)/2, (H - vH*scBg)/2, vW*scBg, vH*scBg);
+  tCtx.restore();
+
+  const sf = Math.min(W / vW, zoneH / vH);
+  const dW = vW * sf, dH = vH * sf;
+  const dX = (W - dW) / 2, dY = (zoneH - dH) / 2;
+  const srcW = vW / zoom, srcH = vH / zoom;
+  const srcX = (vW - srcW) * pX, srcY = (vH - srcH) * pY;
+  tCtx.drawImage(video, srcX, srcY, srcW, srcH, dX, dY, dW, dH);
+}
+
+/* ── Caption central (pill) para formatos de doble zona ── */
+function drawDividerCaption(tCtx, W, splitY, title, H) {
+  tCtx.save();
+  let fs = Math.round(40 * (W / 1080));
+  const minFs = Math.round(24 * (W / 1080));
+  tCtx.font = `${fs}px ${FONT}`;
+  while (tCtx.measureText(title).width > W - 140 && fs > minFs) {
+    fs -= 2; tCtx.font = `${fs}px ${FONT}`;
+  }
+  const padX = 22 * (W / 1080), padY = 12 * (W / 1080);
+  const textW = tCtx.measureText(title).width;
+  const pillW = textW + padX * 2, pillH = fs + padY * 2;
+  const pillX = (W - pillW) / 2, pillY = splitY - pillH / 2;
+  const rad = pillH / 2;
+
+  tCtx.fillStyle = 'rgba(0,0,0,0.72)';
+  roundRect(tCtx, pillX, pillY, pillW, pillH, rad);
+  tCtx.fill();
+  tCtx.strokeStyle = 'rgba(83,252,24,.9)';
+  tCtx.lineWidth = Math.max(1, W / 1080);
+  roundRect(tCtx, pillX, pillY, pillW, pillH, rad);
+  tCtx.stroke();
+
+  tCtx.fillStyle = '#ffffff';
+  tCtx.textAlign = 'center';
+  tCtx.textBaseline = 'middle';
+  tCtx.fillText(title, W / 2, splitY + 1);
+  tCtx.restore();
+}
+function roundRect(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+/* ─────────────────────────────────────────────
+   BADGE  KICK / NOMBRE
+────────────────────────────────────────────── */
+function drawKickBadge(tCtx, W, midY, name) {
+  tCtx.save();
+  tCtx.textBaseline = 'middle';
+  tCtx.textAlign    = 'left';
+  const fs  = Math.round(38 * (W / 1080));
+  tCtx.font  = `${fs}px ${FONT}`;
+
+  const kickTxt = 'KICK';
+  const sepTxt  = ` / ${name}`;
+  const kickW   = tCtx.measureText(kickTxt).width;
+  const sepW    = tCtx.measureText(sepTxt).width;
+  const totalW  = kickW + sepW + 4;
+  const startX  = (W - totalW) / 2;
+
+  tCtx.shadowColor = 'rgba(0,0,0,0.8)';
+  tCtx.shadowBlur  = 6;
+
+  tCtx.fillStyle = '#53fc18';
+  tCtx.fillText(kickTxt, startX, midY);
+
+  tCtx.fillStyle = '#ffffff';
+  tCtx.fillText(sepTxt, startX + kickW + 2, midY);
+
+  tCtx.restore();
+}
+
+/* ─────────────────────────────────────────────
+   BANNER STRIP del streamer
+────────────────────────────────────────────── */
+function drawBannerStrip(tCtx, W, Y, H) {
+  tCtx.save();
+  tCtx.filter = 'blur(14px) brightness(0.5)';
+  tCtx.drawImage(bannerImg, 0, Y, W, H);
+  tCtx.filter = 'none';
+  const bAR    = bannerImg.naturalWidth / bannerImg.naturalHeight;
+  const bDestH = H;
+  const bDestW = bAR * bDestH;
+  const bDestX = (W - bDestW) / 2;
+  tCtx.drawImage(bannerImg, bDestX, Y, bDestW, bDestH);
+  tCtx.restore();
+}
+
+/* ─────────────────────────────────────────────
+   PLACEHOLDER vacío
+────────────────────────────────────────────── */
+function drawPlaceholderText(tCtx, W, H) {
+  tCtx.save();
+  tCtx.font = `52px ${FONT}`;
+  tCtx.fillStyle = '#1e2d3d';
+  tCtx.textAlign = 'center'; tCtx.textBaseline = 'middle';
+  tCtx.fillText('SIN VIDEO', W / 2, H / 2 - 40);
+  tCtx.font = '32px sans-serif';
+  tCtx.fillStyle = '#2a3d52';
+  tCtx.fillText('Carga un clip para comenzar', W / 2, H / 2 + 20);
+  tCtx.restore();
+}
+
+/* ═══════════════════════════════════════════════════════
+   DETECCIÓN DE MÓVIL
+═══════════════════════════════════════════════════════ */
+const IS_MOBILE = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+/* ═══════════════════════════════════════════════════════
+   PREVIEW LOOP
+═══════════════════════════════════════════════════════ */
+function startPreviewLoop() {
+  cancelAnimationFrame(animId);
+  function tick() {
+    drawFrame();
+    if (!video.paused && !video.seeking) {
+      prevTime.textContent = `${fmtDur(video.currentTime)} / ${fmtDur(video.duration)}`;
+      updateTrimPlayhead();
+      /* Respeta el recorte: si el preview llega al punto de fin
+         marcado, se pausa ahí en vez de seguir reproduciendo el
+         resto del clip original. */
+      if (!isExporting() && trimEnd > 0 && video.currentTime >= trimEnd - 0.02) {
+        video.pause();
+        video.currentTime = trimEnd;
+      }
+    }
+    animId = requestAnimationFrame(tick);
+  }
+  animId = requestAnimationFrame(tick);
+}
+function stopPreviewLoop() {
+  cancelAnimationFrame(animId);
+  animId = null;
+}
+
+/* ── Botón Reproducir/Pausar del preview ──
+   El video se reproduce CON audio (antes quedaba muteado y el
+   botón reproducía en silencio). Al reproducir, si el cabezal
+   está fuera del rango marcado (o llegó justo al final del
+   recorte), vuelve al inicio del recorte para que "reproducir"
+   siempre muestre el clip final. */
+btnPlay.addEventListener('click', async () => {
+  if (video.paused) {
+    video.muted = false;
+    if (video.currentTime < trimStart || video.currentTime >= trimEnd - 0.02) {
+      await seekVideo(video, trimStart);
+    }
+    video.play().catch(() => {});
+  } else {
+    video.pause();
+  }
+});
+video.addEventListener('play',  () => { btnPlay.textContent = '⏸ Pausar'; });
+video.addEventListener('pause', () => {
+  btnPlay.textContent = '▶ Reproducir';
+  prevTime.textContent = `${fmtDur(video.currentTime)} / ${fmtDur(video.duration)}`;
+  updateTrimPlayhead();
+});
+
+/* ── Auto-fade de la burbuja de ayuda ──
+   Se oculta sola tras la primera interacción con el preview o,
+   como máximo, a los 5s, para que deje de taparlo. */
+let hintDismissed = false;
+function dismissDragHint() {
+  if (hintDismissed) return;
+  hintDismissed = true;
+  dragHint.classList.add('faded');
+}
+canvas.addEventListener('mousedown', dismissDragHint, { once: true });
+canvas.addEventListener('touchstart', dismissDragHint, { once: true });
+canvas.addEventListener('wheel', dismissDragHint, { once: true });
+setTimeout(dismissDragHint, 5000);
+
+/* ═══════════════════════════════════════════════════════
+   TRIM BAR — recorte de entrada/salida
+   ──────────────────────────────────────────────────────
+   Permite marcar un punto de inicio y fin dentro del clip
+   cargado, sin necesidad de subirlo ya cortado. El preview
+   respeta esos límites al reproducir, y la exportación solo
+   procesa el segmento marcado.
+═══════════════════════════════════════════════════════ */
+const TRIM_MIN_GAP = 0.3; // segundos mínimos entre inicio y fin
+
+function resetTrimToFull() {
+  trimStart = 0;
+  trimEnd   = video.duration || 0;
+  renderTrimUI();
+}
+
+function renderTrimUI() {
+  const dur = video.duration;
+  if (!dur || !isFinite(dur)) return;
+  const pctS = clamp((trimStart / dur) * 100, 0, 100);
+  const pctE = clamp((trimEnd   / dur) * 100, 0, 100);
+  trimHandleS.style.left = pctS + '%';
+  trimHandleE.style.left = pctE + '%';
+  trimRange.style.left  = pctS + '%';
+  trimRange.style.width = Math.max(0, pctE - pctS) + '%';
+  trimStartLbl.textContent = `Inicio: ${fmtDur(trimStart)}`;
+  trimEndLbl.textContent   = `Fin: ${fmtDur(trimEnd)}`;
+  trimDurLbl.textContent   = `Duración: ${fmtDur(Math.max(0, trimEnd - trimStart))}`;
+  updateTrimPlayhead();
+}
+
+function updateTrimPlayhead() {
+  const dur = video.duration;
+  if (!dur || !isFinite(dur)) return;
+  const pct = clamp((video.currentTime / dur) * 100, 0, 100);
+  trimPlayhead.style.left = pct + '%';
+}
+
+function timeFromTrimEvent(clientX) {
+  const rect = trimTrack.getBoundingClientRect();
+  const frac = clamp((clientX - rect.left) / rect.width, 0, 1);
+  return frac * (video.duration || 0);
+}
+
+/* Arrastre de los handles de inicio/fin */
+function trimPointerDown(handle, clientX) {
+  trimDragHandle = handle;
+  seekVideo(video, handle === 'start' ? trimStart : trimEnd).then(() => drawFrame());
+}
+trimHandleS.addEventListener('mousedown', e => { e.stopPropagation(); trimPointerDown('start', e.clientX); });
+trimHandleE.addEventListener('mousedown', e => { e.stopPropagation(); trimPointerDown('end', e.clientX); });
+trimHandleS.addEventListener('touchstart', e => { e.stopPropagation(); trimPointerDown('start', e.touches[0].clientX); }, { passive: true });
+trimHandleE.addEventListener('touchstart', e => { e.stopPropagation(); trimPointerDown('end', e.touches[0].clientX); }, { passive: true });
+
+window.addEventListener('mousemove', e => {
+  if (!trimDragHandle) return;
+  handleTrimDrag(e.clientX);
+});
+window.addEventListener('mouseup', () => { trimDragHandle = null; });
+trimTrack.addEventListener('touchmove', e => {
+  if (!trimDragHandle) return;
+  e.preventDefault();
+  handleTrimDrag(e.touches[0].clientX);
+}, { passive: false });
+trimTrack.addEventListener('touchend', () => { trimDragHandle = null; });
+
+function handleTrimDrag(clientX) {
+  const t = timeFromTrimEvent(clientX);
+  if (trimDragHandle === 'start') {
+    trimStart = clamp(t, 0, trimEnd - TRIM_MIN_GAP);
+  } else if (trimDragHandle === 'end') {
+    trimEnd = clamp(t, trimStart + TRIM_MIN_GAP, video.duration || 0);
+  }
+  renderTrimUI();
+  seekVideo(video, trimDragHandle === 'start' ? trimStart : trimEnd).then(() => { if (!isExporting()) drawFrame(); });
+}
+
+/* Click en el track (fuera de los handles) mueve el cabezal de
+   reproducción, útil para revisar un punto exacto del clip */
+trimTrack.addEventListener('click', e => {
+  if (trimDragHandle) return;
+  const t = clamp(timeFromTrimEvent(e.clientX), trimStart, trimEnd);
+  seekVideo(video, t).then(() => { if (!isExporting()) drawFrame(); updateTrimPlayhead(); });
+});
+
+/* Marcar inicio/fin en la posición actual de reproducción */
+btnMarkStart.addEventListener('click', () => {
+  trimStart = clamp(video.currentTime, 0, trimEnd - TRIM_MIN_GAP);
+  renderTrimUI();
+});
+btnMarkEnd.addEventListener('click', () => {
+  trimEnd = clamp(video.currentTime, trimStart + TRIM_MIN_GAP, video.duration || 0);
+  renderTrimUI();
+});
+btnResetTrim.addEventListener('click', resetTrimToFull);
+
+video.addEventListener('pause', () => { if (!isExporting()) drawFrame(); });
+video.addEventListener('seeked', () => { if (!isExporting()) drawFrame(); });
+let _exporting = false;
+function isExporting() { return _exporting; }
+
+/* ═══════════════════════════════════════════════════════
+   SEGURIDAD DE EXPORTACIÓN EN 2DO PLANO
+   ──────────────────────────────────────────────────────
+   La grabación se impulsa con requestVideoFrameCallback,
+   que sigue disparándose aunque la pestaña esté oculta
+   (a diferencia de requestAnimationFrame, que el navegador
+   pausa). Esto permite que el usuario cambie de pestaña o
+   minimice la ventana mientras el export continúa.
+   Además: Wake Lock evita que la pantalla se apague en
+   móvil, y un aviso de beforeunload evita cerrar la pestaña
+   por accidente y perder el progreso.
+═══════════════════════════════════════════════════════ */
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLockRef = await navigator.wakeLock.request('screen');
+    }
+  } catch { /* no soportado o denegado, continuar igual */ }
+}
+function releaseWakeLock() {
+  try { wakeLockRef?.release(); } catch {}
+  wakeLockRef = null;
+}
+
+/* ── Picture-in-Picture durante la exportación ──
+   Este es el arreglo real y robusto contra el freeze en 2do plano:
+   los navegadores SIEMPRE mantienen la decodificación activa de un
+   video en PiP, sin importar si la pestaña está oculta. Sin esto,
+   algunos navegadores pueden pausar los frames del <video> al
+   cambiar de pestaña (aunque siga sonando el audio), resultando en
+   una imagen congelada en el archivo exportado.
+   Aparece una ventanita flotante mientras exporta; se cierra sola
+   al terminar. Si el navegador la bloquea, el export sigue igual,
+   solo que en ese caso es más seguro no cambiar de pestaña. */
+async function requestExportPiP() {
+  try {
+    if (document.pictureInPictureEnabled && document.pictureInPictureElement !== video) {
+      await video.requestPictureInPicture();
+    }
+  } catch { /* PiP no disponible/bloqueada — el export continúa igual */ }
+}
+function exitExportPiP() {
+  try {
+    if (document.pictureInPictureElement === video) {
+      document.exitPictureInPicture().catch(() => {});
+    }
+  } catch {}
+}
+window.addEventListener('beforeunload', e => {
+  if (_exporting) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+document.addEventListener('visibilitychange', () => {
+  if (_exporting && document.visibilityState === 'hidden') {
+    bgBannerTxt.textContent = 'Exportando en segundo plano… puede aparecer una ventanita flotante del video, es normal (evita que se congele). Vuelve a esta pestaña cuando quieras descargar.';
+  } else if (_exporting) {
+    bgBannerTxt.textContent = 'Exportando… puedes cambiar de pestaña, el proceso continúa en segundo plano.';
+  }
+});
+
+/* ═══════════════════════════════════════════════════════
+   EXPORTAR — motor frame-accurate, optimizado para TikTok
+   ──────────────────────────────────────────────────────
+   • Resolución: 1080×1920 (recomendado) o 720×1280.
+   • Codec: intenta H.264 (mejor compatibilidad con TikTok),
+     con fallback a VP9/VP8/WebM si el navegador no soporta MP4.
+   • Bitrate escalado según resolución para calidad óptima
+     sin generar archivos innecesariamente pesados.
+   • Audio AAC/Opus a 128kbps.
+   • Framerate: 30fps (está dentro del rango soportado por
+     TikTok, que acepta 23–60fps).
+═══════════════════════════════════════════════════════ */
+btnExport.addEventListener('click', startExport);
+
+async function startExport() {
+  if (!video.src) { setStatus('err', '❌ No hay video cargado.'); return; }
+
+  const clipStart = trimStart;
+  const clipEnd   = trimEnd > clipStart ? trimEnd : video.duration;
+  const clipDur   = clipEnd - clipStart;
+  if (clipDur <= 0.1) {
+    setStatus('err', '❌ El rango de recorte es muy corto. Ajusta los puntos de inicio/fin.');
+    return;
+  }
+
+  _exporting   = true;
+  chunks       = [];
+  exportedBlob = null;
+  btnDl.classList.remove('vis');
+  btnShare.classList.remove('vis');
+  btnExport.disabled = true;
+  progWrap.classList.add('visible');
+  bgBanner.classList.add('vis');
+  setProgress(0);
+  const trimmedNote = (clipStart > 0 || clipEnd < video.duration)
+    ? ` (recorte ${fmtDur(clipStart)}–${fmtDur(clipEnd)})` : '';
+  setStatus('info', `⏳ Preparando exportación${trimmedNote}…`);
+  requestWakeLock();
+  await requestExportPiP();
+
+  const duration = clipDur;
+
+  const CODECS = [
+    { mime: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', ext: 'mp4' },
+    { mime: 'video/mp4;codecs=avc1',                    ext: 'mp4' },
+    { mime: 'video/webm;codecs=vp9,opus',               ext: 'webm' },
+    { mime: 'video/webm;codecs=vp8,opus',               ext: 'webm' },
+    { mime: 'video/webm',                               ext: 'webm' },
+  ];
+  const chosen = CODECS.find(c => MediaRecorder.isTypeSupported(c.mime));
+  if (!chosen) {
+    return exportError('Tu navegador no soporta MediaRecorder. Prueba en Chrome o Edge.');
+  }
+
+  /* Tamaño de exportación según resolución elegida.
+     En móvil, si se pidió 1080p igual bajamos internamente a
+     720p para evitar frames perdidos por CPU limitada — el
+     usuario puede forzar 1080p si su dispositivo lo soporta bien. */
+  const targetW = exportResolution === 1080 ? 1080 : 720;
+  const targetH = exportResolution === 1080 ? 1920 : 1280;
+  const bitrate = exportResolution === 1080 ? 9_000_000 : 5_000_000;
+
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width  = targetW;
+  exportCanvas.height = targetH;
+  const exportCtx = exportCanvas.getContext('2d');
+  setStatus('info', `📤 Exportando a ${targetW}×${targetH} (${chosen.ext.toUpperCase()})…`);
+
+  let canvasStream;
+  try {
+    canvasStream = exportCanvas.captureStream(30);
+  } catch (e) {
+    return exportError('captureStream no soportado: ' + e.message);
+  }
+
+  let combined = canvasStream;
+  try {
+    const vs = video.captureStream?.() || video.mozCaptureStream?.();
+    const at = vs?.getAudioTracks() ?? [];
+    if (at.length > 0) {
+      combined = new MediaStream([
+        canvasStream.getVideoTracks()[0],
+        at[0]
+      ]);
+    }
+  } catch { /* sin audio, continuar */ }
+
+  let rec;
+  try {
+    rec = new MediaRecorder(combined, {
+      mimeType: chosen.mime,
+      videoBitsPerSecond: bitrate,
+      audioBitsPerSecond: 128_000,
+    });
+  } catch (e) {
+    return exportError('Error al crear MediaRecorder: ' + e.message);
+  }
+
+  recorder = rec;
+  rec.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
+  rec.onerror = e => exportError('MediaRecorder error: ' + (e.error?.message || 'desconocido'));
+  rec.onstop  = () => {
+    if (chunks.length === 0) {
+      return exportError('No se capturaron datos. El clip puede ser muy corto o el codec falló.');
+    }
+    finishExport(chosen.ext);
+  };
+
+  stopPreviewLoop();
+  await seekVideo(video, clipStart);
+  video.muted = false;
+
+  rec.start(100);
+
+  const HAS_RVFC = typeof video.requestVideoFrameCallback === 'function';
+  let stopped = false;
+
+  function drawToExportCanvas() {
+    drawFrameToCtx(exportCtx, targetW, targetH, false);
+  }
+
+  /* finishRecording centraliza el cierre de la grabación — se
+     llama tanto cuando se alcanza el punto de fin del recorte
+     (caso normal, ya que si clipEnd < duration real el video
+     nunca dispara 'ended') como cuando el clip llega a su fin
+     natural (recorte = clip completo). */
+  function finishRecording() {
+    if (stopped) return;
+    stopped = true;
+    setTimeout(() => {
+      if (rec.state === 'recording') rec.stop();
+      _exporting = false;
+      btnExport.disabled = false;
+      bgBanner.classList.remove('vis');
+      releaseWakeLock();
+      exitExportPiP();
+      stopPreviewLoop();
+      setProgress(100);
+      progTime.textContent = `${fmtDur(duration)} / ${fmtDur(duration)}`;
+      video.pause();
+      drawFrame();
+    }, 150);
+  }
+
+  if (HAS_RVFC) {
+    /* requestVideoFrameCallback sigue activo aunque la pestaña
+       esté en segundo plano — por eso el export no se detiene
+       si el usuario navega a otra pestaña o app. */
+    function onVideoFrame(now, meta) {
+      if (!_exporting) return;
+      drawToExportCanvas();
+      updateExportProgress(meta.mediaTime - clipStart, duration);
+      if (meta.mediaTime >= clipEnd - 0.01) {
+        finishRecording();
+        return;
+      }
+      video.requestVideoFrameCallback(onVideoFrame);
+    }
+    video.requestVideoFrameCallback(onVideoFrame);
+  } else {
+    /* Fallback para navegadores sin rVFC (Firefox <116, Safari <15.4) */
+    video.addEventListener('timeupdate', function onTU() {
+      if (!_exporting) { video.removeEventListener('timeupdate', onTU); return; }
+      drawToExportCanvas();
+      updateExportProgress(video.currentTime - clipStart, duration);
+      if (video.currentTime >= clipEnd - 0.03) {
+        video.removeEventListener('timeupdate', onTU);
+        finishRecording();
+      }
+    });
+  }
+
+  await video.play().catch(e => exportError('No se pudo reproducir el video: ' + e.message));
+
+  video.onended = () => {
+    if (!_exporting) return;
+    finishRecording();
+  };
+}
+
+/* ── helpers de progreso y seek ── */
+function updateExportProgress(currentTime, duration) {
+  const pct = Math.min(99, (currentTime / duration) * 100);
+  setProgress(pct);
+  progTime.textContent = `${fmtDur(currentTime)} / ${fmtDur(duration)}`;
+}
+
+function seekVideo(vid, time) {
+  return new Promise(resolve => {
+    if (Math.abs(vid.currentTime - time) < 0.05) { resolve(); return; }
+    const onSeeked = () => { vid.removeEventListener('seeked', onSeeked); resolve(); };
+    vid.addEventListener('seeked', onSeeked);
+    vid.currentTime = time;
+    setTimeout(resolve, 1500);
+  });
+}
+
+function finishExport(ext) {
+  exportedBlob = new Blob(chunks, { type: recorder.mimeType });
+  const mb = (exportedBlob.size / 1e6).toFixed(1);
+  const filename = `clip_${txtStreamer.value.trim().toLowerCase() || 'stream'}.${ext}`;
+
+  setStatus('ok', `✅ Exportación lista · ${mb} MB · formato ${ext.toUpperCase()}`);
+  progWrap.classList.remove('visible');
+
+  btnDl.textContent = `⬇ Descargar ${filename}`;
+  btnDl.classList.add('vis');
+  btnDl._filename = filename;
+
+  btnShare.classList.add('vis');
+
+  tryDownload(exportedBlob, filename);
+}
+
+function exportError(msg) {
+  _exporting = false;
+  recorder   = null;
+  chunks     = [];
+  btnExport.disabled = false;
+  progWrap.classList.remove('visible');
+  bgBanner.classList.remove('vis');
+  releaseWakeLock();
+  exitExportPiP();
+  setStatus('err', '❌ ' + msg);
+}
+
+/* ═══════════════════════════════════════════════════════
+   DESCARGA
+═══════════════════════════════════════════════════════ */
+btnDl.addEventListener('click', () => {
+  if (!exportedBlob) return;
+  tryDownload(exportedBlob, btnDl._filename || 'clip.webm');
+});
+
+function tryDownload(blob, filename) {
+  try {
+    const url = URL.createObjectURL(blob);
+    const a   = Object.assign(document.createElement('a'), {
+      href: url, download: filename, style: 'display:none'
+    });
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 8000);
+  } catch (e) {
+    setStatus('warn', '⚠ Descarga directa falló. Usa el botón "Compartir".');
+  }
+}
+
+/* ─── Share API (iOS Safari / Chrome Android) ─── */
+btnShare.addEventListener('click', async () => {
+  if (!exportedBlob) {
+    setStatus('err', '❌ Exporta el clip primero.'); return;
+  }
+  const ext  = exportedBlob.type.includes('mp4') ? 'mp4' : 'webm';
+  const name = `clip_${txtStreamer.value.trim().toLowerCase() || 'stream'}.${ext}`;
+  const file = new File([exportedBlob], name, { type: exportedBlob.type });
+
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: txtTitle.value });
+      setStatus('ok', '✅ Compartido correctamente.');
+    } catch (e) {
+      if (e.name !== 'AbortError') {
+        setStatus('warn', '⚠ Compartir falló. Intenta descargar directamente.');
+      }
+    }
+  } else {
+    const url = URL.createObjectURL(exportedBlob);
+    const w   = window.open(url, '_blank');
+    if (!w) {
+      setStatus('warn', '⚠ Popup bloqueado. Usa el botón Descargar.');
+    } else {
+      setStatus('info', '📂 Se abrió en una pestaña nueva. Mantén presionado el video → Guardar.');
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 20000);
+  }
+});
+
+/* ═══════════════════════════════════════════════════════
+   UI HELPERS
+═══════════════════════════════════════════════════════ */
+function setStatus(type, msg) {
+  statusBox.className = `status-box ${type}`;
+  statusBox.textContent = msg;
+}
+function setProgress(pct) {
+  const p = Math.round(pct);
+  progFill.style.width = p + '%';
+  progPct.textContent  = p + '%';
+}
+function fmtDur(sec) {
+  if (!isFinite(sec) || sec < 0) return '0:00';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60).toString().padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+/* ═══════════════════════════════════════════════════════
+   INIT
+═══════════════════════════════════════════════════════ */
+buildFormatCards();
+selectLayout(currentLayoutKey);
+drawFrame();
+consumePendingRenderPayload();
+
+// Por si esta pestaña carga ANTES de que el dashboard termine de armar el
+// blob (lo más común, ya que abrir la pestaña es instantáneo pero construir
+// el video toma unos segundos): escuchamos el aviso y reintentamos entonces.
+try {
+  const renderHandoffChannel = new BroadcastChannel('render_handoff');
+  renderHandoffChannel.onmessage = (e) => {
+    if (e.data === 'payload-ready') consumePendingRenderPayload();
+  };
+} catch (e) {
+  // BroadcastChannel no disponible en algún navegador viejo: no bloqueante,
+  // el usuario puede recargar la página como fallback.
+}
+</script>
+</body>
+</html>
