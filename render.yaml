@@ -1,0 +1,13 @@
+# Blueprint de Render — te ahorra configurar todo a mano en el dashboard.
+# En Render: New + -> Blueprint -> conectá el repo -> Render lee este
+# archivo solo. La API key la vas a tener que cargar a mano en el
+# dashboard de todas formas (sync: false = nunca se guarda en el repo).
+services:
+  - type: web
+    name: clip-analyzer
+    env: docker
+    plan: free
+    healthCheckPath: /docs
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false

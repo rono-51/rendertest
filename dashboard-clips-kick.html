@@ -1,0 +1,888 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard de Clips - Kick</title>
+    <!-- CSS de Tailwind listo para producción -->
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.15/hls.min.js"></script>
+    <!-- mux.js: remuxea TS -> fMP4 en el navegador (la misma librería que usa hls.js
+         internamente). Mucho más liviana que ffmpeg.wasm (~100KB vs ~25MB) y ya resuelve
+         por diseño el problema de timestamps discontinuos entre segmentos. -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mux.js/5.10.0/mux.min.js"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen p-6">
+
+    <div class="max-w-7xl mx-auto flex gap-6">
+
+        <!-- Sidebar de Streamers -->
+        <aside class="hidden md:block w-52 shrink-0">
+            <h2 class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-3">Streamers rápidos</h2>
+            <div id="streamer-list" class="flex flex-col gap-1"></div>
+        </aside>
+
+        <div class="flex-1 min-w-0">
+            <!-- Header con Buscador -->
+            <header class="mb-8 border-b border-gray-800 pb-6 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                <div>
+                    <h1 class="text-3xl font-bold text-green-400 flex items-center gap-2">
+                        <span class="w-3 h-3 rounded-full bg-green-500 inline-block animate-pulse"></span>
+                        Dashboard de Clips - Kick
+                    </h1>
+                    <p class="text-gray-400 mt-1">Viendo clips de la semana ordenados por fecha</p>
+                </div>
+
+                <!-- Buscador Dinámico -->
+                <form id="search-form" class="flex w-full md:w-auto gap-2">
+                    <input type="text" id="search-input" value="daarick" placeholder="Nombre del streamer..."
+                           class="bg-gray-800 border border-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:border-green-500 w-full md:w-64 font-medium">
+                    <button type="submit" class="bg-green-500 hover:bg-green-600 text-gray-950 font-bold px-5 py-2 rounded-lg transition-colors">
+                        Buscar
+                    </button>
+                </form>
+            </header>
+
+            <!-- Estado de Carga -->
+            <div id="loading" class="text-center py-12">
+                <p class="text-xl text-gray-400 animate-bounce">Buscando clips en Kick...</p>
+            </div>
+
+            <!-- Mensaje de Error (Oculto por defecto) -->
+            <div id="error-msg" class="hidden bg-red-900/50 border border-red-500 text-red-200 p-4 rounded-lg mb-6">
+                No se pudieron cargar los clips. Verifica que el nombre del streamer esté bien escrito o que el canal tenga clips públicos creados esta semana.
+            </div>
+
+            <!-- Contenedor de Clips -->
+            <div id="clips-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Los clips se inyectarán aquí -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Barra flotante de selección para scoring -->
+    <div id="selection-bar" class="hidden fixed bottom-0 left-0 right-0 z-50 bg-gray-800 border-t border-gray-700 shadow-2xl">
+        <div class="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between gap-4">
+            <span id="selection-count" class="text-sm text-gray-300 font-medium">0 clips seleccionados</span>
+            <div class="flex items-center gap-3">
+                <span id="rank-status-text" class="text-sm text-gray-400"></span>
+                <button id="clear-selection-btn" onclick="clearSelection()"
+                        class="text-sm text-gray-400 hover:text-white px-3 py-2">
+                    Limpiar
+                </button>
+                <button id="analyze-selected-btn" onclick="analyzeSelectedClips()"
+                        class="bg-green-500 hover:bg-green-600 text-gray-950 font-bold px-5 py-2 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    ⚡ Analizar seleccionados
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Conservamos tu URL original del Worker
+        const WORKER_BASE_URL = 'https://kick-clips-proxy.clips-tt-ron21.workers.dev/';
+
+        // URL de tu API del sistema de scoring (api.py). Cámbiala si corre en otro lado.
+        // Se adapta automáticamente: si abres esto desde localhost, apunta a
+        // localhost; si lo abres desde el celular usando la IP de tu PC en la
+        // red local (ej. http://192.168.1.50:8000/...), apunta a esa misma IP.
+        // Así no hay que tocar nada al cambiar de dispositivo.
+        const API_URL = window.location.origin;
+
+        // Selección de clips para rankear: id -> objeto clip (formato de la API de Kick)
+        var selectedClips = {};
+        // Cache de todos los clips cargados, por id (para recuperar sus datos al seleccionar)
+        var clipsById = {};
+        // Cache de los resultados de análisis de Gemini por clip id (para "Renderizar")
+        var analysisResultsById = {};
+
+        const ALL_STREAMERS = [
+            "antonicratv","zullyy_cs","sideral","sachauzumaki",
+            "daarick","emetsuki","elglogloking","cristorata7",
+            "esbebote","jessybaby","jefrain","cirilotv","kingteka","luisormenoa27","butisito","tinaplays"
+        ];
+
+        const clipsContainer = document.getElementById('clips-container');
+        const loadingElement = document.getElementById('loading');
+        const errorElement = document.getElementById('error-msg');
+        const searchForm = document.getElementById('search-form');
+        const searchInput = document.getElementById('search-input');
+
+        function getRelativeTime(dateString) {
+            if (!dateString) return "Tiempo desconocido";
+
+            const createdDate = new Date(dateString);
+            const now = new Date();
+            const diffMs = now - createdDate;
+
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMins / 60);
+            const diffDays = Math.floor(diffHours / 24);
+
+            if (diffMins < 1) return "Hace unos instantes";
+            if (diffMins < 60) return `Hace ${diffMins} min`;
+            if (diffHours < 24) return `Hace ${diffHours} ${diffHours === 1 ? 'hora' : 'horas'}`;
+            return `Hace ${diffDays} ${diffDays === 1 ? 'día' : 'días'}`;
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds) return "0:00";
+            const totalSeconds = Math.floor(seconds);
+            const mins = Math.floor(totalSeconds / 60);
+            const secs = totalSeconds % 60;
+            return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+        }
+
+        // --- Selección de clips para análisis ---
+        function toggleClipSelection(clipId, isChecked) {
+            if (isChecked) {
+                const clip = clipsById[clipId];
+                if (clip) selectedClips[clipId] = clip;
+            } else {
+                delete selectedClips[clipId];
+            }
+            updateSelectionBar();
+        }
+
+        function clearSelection() {
+            Object.keys(selectedClips).forEach(id => delete selectedClips[id]);
+            document.querySelectorAll('.clip-select-checkbox').forEach(cb => { cb.checked = false; });
+            document.querySelectorAll('[id^="verdict-badge-"]').forEach(el => {
+                el.classList.add('hidden');
+                el.className = el.className.replace(/\bbg-\S+/g, '').trim();
+                el.querySelector('span').textContent = '';
+            });
+            document.querySelectorAll('[id^="verdict-details-"]').forEach(el => {
+                el.classList.add('hidden');
+                el.textContent = '';
+            });
+            document.querySelectorAll('[id^="verdict-toggle-"]').forEach(el => {
+                el.classList.add('hidden');
+            });
+            document.querySelectorAll('[data-clip-id]').forEach(card => {
+                card.classList.remove('opacity-40', 'grayscale');
+            });
+            document.getElementById('rank-status-text').textContent = '';
+            updateSelectionBar();
+        }
+
+        function updateSelectionBar() {
+            const bar = document.getElementById('selection-bar');
+            const count = Object.keys(selectedClips).length;
+            const countLabel = document.getElementById('selection-count');
+            const rankBtn = document.getElementById('analyze-selected-btn');
+
+            if (count === 0) {
+                bar.classList.add('hidden');
+            } else {
+                bar.classList.remove('hidden');
+                countLabel.textContent = `${count} clip${count === 1 ? '' : 's'} seleccionado${count === 1 ? '' : 's'}`;
+            }
+            rankBtn.disabled = count === 0;
+        }
+
+        async function analyzeSelectedClips() {
+            const clipsList = Object.values(selectedClips);
+            if (clipsList.length === 0) return;
+
+            const rankBtn = document.getElementById('analyze-selected-btn');
+            const statusText = document.getElementById('rank-status-text');
+            rankBtn.disabled = true;
+            statusText.textContent = 'Enviando...';
+
+            try {
+                const res = await fetch(`${API_URL}/analyze_clips`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(clipsList),
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({}));
+                    throw new Error(err.detail || `HTTP ${res.status}`);
+                }
+                const { job_id } = await res.json();
+                pollAnalyzeStatus(job_id);
+            } catch (error) {
+                console.error('Error al analizar clips:', error);
+                statusText.textContent = `Error: ${error.message}`;
+                rankBtn.disabled = false;
+            }
+        }
+
+        function pollAnalyzeStatus(jobId) {
+            const statusText = document.getElementById('rank-status-text');
+            const rankBtn = document.getElementById('analyze-selected-btn');
+            const appliedIds = new Set();
+
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch(`${API_URL}/analyze_status/${jobId}`);
+                    const data = await res.json();
+
+                    if (data.status === 'queued' || data.status === 'processing') {
+                        statusText.textContent = `Analizando... (${data.progress || ''})`;
+                        // Aplicamos resultados a medida que van llegando, no solo al final
+                        applyAnalysisResults(data.results, appliedIds);
+                    } else if (data.status === 'done') {
+                        clearInterval(interval);
+                        statusText.textContent = `Listo (${data.results.length} clips analizados)`;
+                        rankBtn.disabled = false;
+                        applyAnalysisResults(data.results, appliedIds);
+                    } else if (data.status === 'error') {
+                        clearInterval(interval);
+                        statusText.textContent = `Error: ${data.error}`;
+                        rankBtn.disabled = false;
+                    }
+                } catch (error) {
+                    clearInterval(interval);
+                    statusText.textContent = `Error de conexión: ${error.message}`;
+                    rankBtn.disabled = false;
+                }
+            }, 3000);
+        }
+
+        function scoreStyle(score) {
+            if (score == null) return { emoji: '❔', badgeClass: 'bg-gray-600 text-white', dim: false };
+            if (score >= 7) return { emoji: '🔥', badgeClass: 'bg-green-500 text-gray-950', dim: false };
+            if (score >= 4) return { emoji: '⚠️', badgeClass: 'bg-yellow-500 text-gray-950', dim: false };
+            return { emoji: '❌', badgeClass: 'bg-red-600 text-white', dim: true };
+        }
+
+        function applyAnalysisResults(results, appliedIds) {
+            // results: [{ id, score, analysis, title_overlay, title_tiktok, hashtags, full_text, error }, ...]
+            (results || []).forEach(r => {
+                if (appliedIds && appliedIds.has(r.id)) return;  // ya aplicado, no re-renderizar
+
+                const card = document.querySelector(`[data-clip-id="${r.id}"]`);
+                const badge = document.getElementById(`verdict-badge-${r.id}`);
+                const details = document.getElementById(`verdict-details-${r.id}`);
+                const toggleBtn = document.getElementById(`verdict-toggle-${r.id}`);
+
+                if (r.error) {
+                    if (badge) {
+                        badge.classList.remove('hidden');
+                        badge.className = badge.className.replace(/\bbg-\S+/g, '').replace(/\btext-\S+/g, '').trim() + ' bg-gray-600 text-white';
+                        badge.querySelector('span').textContent = '⚠️ Error de análisis';
+                    }
+                    if (appliedIds) appliedIds.add(r.id);
+                    return;
+                }
+
+                analysisResultsById[r.id] = r; // cache para el botón "Renderizar"
+
+                const style = scoreStyle(r.score);
+
+                if (badge) {
+                    badge.classList.remove('hidden');
+                    badge.className = badge.className.replace(/\bbg-\S+/g, '').replace(/\btext-\S+/g, '').trim() + ' ' + style.badgeClass;
+                    badge.querySelector('span').textContent = `${style.emoji} ${r.score != null ? r.score + '/10' : 'N/A'}`;
+                }
+
+                if (card) {
+                    card.classList.toggle('opacity-40', style.dim);
+                    card.classList.toggle('grayscale', style.dim);
+                }
+
+                if (details) {
+                    const hashtagsText = (r.hashtags || []).join(' ');
+                    const esc = (s) => (s || '').replace(/'/g, "\\'");
+                    details.innerHTML = `
+                        <p class="mb-2">${r.analysis || r.full_text || '(sin análisis)'}</p>
+                        <p class="text-green-400 cursor-pointer hover:text-white" title="Clic para copiar"
+                           onclick="copyToClipboard('${esc(r.title_overlay)}', this)">🎬 Overlay: ${r.title_overlay || '-'}</p>
+                        <p class="text-blue-300 cursor-pointer hover:text-white mt-1" title="Clic para copiar"
+                           onclick="copyToClipboard('${esc(r.title_tiktok)}', this)">📱 TikTok: ${r.title_tiktok || '-'}</p>
+                        <p class="text-purple-300 cursor-pointer hover:text-white mt-1" title="Clic para copiar"
+                           onclick="copyToClipboard('${esc(hashtagsText)}', this)">#️⃣ ${hashtagsText || '-'}</p>
+                    `;
+                }
+                if (toggleBtn) toggleBtn.classList.remove('hidden');
+
+                if (appliedIds) appliedIds.add(r.id);
+            });
+        }
+
+        function toggleVerdictDetails(clipId) {
+            const details = document.getElementById(`verdict-details-${clipId}`);
+            if (details) details.classList.toggle('hidden');
+        }
+
+        function copyToClipboard(text, el) {
+            navigator.clipboard.writeText(text).then(() => {
+                const original = el.style.color;
+                el.style.color = '#22c55e';
+                setTimeout(() => { el.style.color = original; }, 600);
+            });
+        }
+
+        // --- Sidebar de streamers ---
+        function renderStreamerList() {
+            const container = document.getElementById('streamer-list');
+            container.innerHTML = ALL_STREAMERS.map(name => `
+                <button data-streamer="${name}"
+                        onclick="selectStreamer('${name}')"
+                        class="streamer-btn text-left text-sm px-3 py-2 rounded-lg text-gray-300 hover:bg-gray-800 hover:text-green-400 transition-colors ${name === searchInput.value.trim().toLowerCase() ? 'bg-gray-800 text-green-400' : ''}">
+                    ${name}
+                </button>
+            `).join('');
+        }
+
+        function selectStreamer(name) {
+            searchInput.value = name;
+            document.querySelectorAll('.streamer-btn').forEach(btn => {
+                const isActive = btn.dataset.streamer === name;
+                btn.classList.toggle('bg-gray-800', isActive);
+                btn.classList.toggle('text-green-400', isActive);
+            });
+            fetchClips(name);
+        }
+
+        async function fetchClips(streamerName) {
+            loadingElement.classList.remove('hidden');
+            errorElement.classList.add('hidden');
+            clipsContainer.innerHTML = '';
+            Object.keys(hlsInstances).forEach(id => {
+                hlsInstances[id].destroy();
+                delete hlsInstances[id];
+            });
+
+            // Limpiamos selección y cache al cambiar de streamer
+            Object.keys(selectedClips).forEach(id => delete selectedClips[id]);
+            Object.keys(clipsById).forEach(id => delete clipsById[id]);
+            updateSelectionBar();
+
+            const finalUrl = `${WORKER_BASE_URL}?streamer=${encodeURIComponent(streamerName.trim().toLowerCase())}`;
+
+            try {
+                const response = await fetch(finalUrl);
+                if (!response.ok) throw new Error(`Error en el Worker: ${response.status}`);
+
+                const data = await response.json();
+                const clips = data.clips || data.data || [];
+
+                if (clips.length === 0) {
+                    clipsContainer.innerHTML = `<p class="text-gray-400 col-span-full text-center py-6">No se encontraron clips recientes para "${streamerName}" esta semana.</p>`;
+                    return;
+                }
+
+                renderClips(clips);
+            } catch (error) {
+                console.error("Error al obtener los clips:", error);
+                errorElement.classList.remove('hidden');
+            } finally {
+                loadingElement.classList.add('hidden');
+            }
+        }
+
+        function renderClips(clips) {
+            clips.forEach((clip, index) => {
+                const title = clip.title || 'Clip sin título';
+                const thumbnail = clip.thumbnail_url || 'https://via.placeholder.com/320x180?text=No+Thumbnail';
+                const videoSrc = clip.video_url;
+                const creator = clip.creator ? clip.creator.username : 'Usuario';
+                const category = clip.category ? clip.category.name : 'Sin categoría';
+                const views = clip.views || 0;
+                const timeAgo = getRelativeTime(clip.created_at);
+                const durationHtml = formatDuration(clip.duration);
+                const streamerChannel = (clip.channel && clip.channel.slug) ? clip.channel.slug : searchInput.value.trim().toLowerCase();
+                const kickClipUrl = `https://kick.com/${streamerChannel}/clips/${clip.id}`;
+                const videoId = `video-${index}`;
+                const safeTitle = title.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+
+                // Guardamos el clip completo para poder mandarlo al scorer al seleccionarlo
+                clipsById[clip.id] = {
+                    id: clip.id,
+                    title: title,
+                    clip_url: clip.clip_url || clip.video_url,
+                    duration: clip.duration || 0,
+                    category: category,
+                    streamer: streamerChannel,
+                };
+
+                const clipCard = `
+                    <div class="bg-gray-800 rounded-xl overflow-hidden shadow-lg border border-gray-700 hover:border-green-500/50 transition-all duration-300 flex flex-col justify-between"
+                         data-clip-id="${clip.id}">
+                        <div>
+                            <div class="relative block aspect-video bg-gray-900 overflow-hidden group cursor-pointer"
+                                 id="preview-${videoId}"
+                                 onclick="handleClick('${videoId}', '${videoSrc}')">
+
+                                <video id="${videoId}" poster="${thumbnail}" loop playsinline
+                                       class="w-full h-full object-cover"></video>
+
+                                <!-- Checkbox de selección para scoring -->
+                                <label class="absolute top-2 left-2 z-30 flex items-center justify-center w-7 h-7 rounded-md bg-black/80 cursor-pointer"
+                                       onclick="event.stopPropagation()">
+                                    <input type="checkbox" class="clip-select-checkbox w-4 h-4 accent-green-500 cursor-pointer"
+                                           data-clip-id="${clip.id}"
+                                           onchange="toggleClipSelection('${clip.id}', this.checked)">
+                                </label>
+
+                                <!-- Badge de ranking (se llena tras el scoring) -->
+                                <div id="verdict-badge-${clip.id}" class="hidden absolute inset-0 z-20 flex items-start justify-center pt-8 pointer-events-none">
+                                    <span class="font-bold text-sm px-3 py-1 rounded-full shadow-lg"></span>
+                                </div>
+
+                                <!-- Botón de sonido -->
+                                <button onclick="toggleMute(event, '${videoId}')"
+                                        id="mute-btn-${videoId}"
+                                        class="hidden absolute bottom-2 left-2 z-30 bg-black/80 text-white text-xs w-7 h-7 rounded-full items-center justify-center">
+                                    🔊
+                                </button>
+
+                                <!-- Botón de velocidad -->
+                                <button onclick="cycleSpeed(event, '${videoId}')"
+                                        id="speed-btn-${videoId}"
+                                        class="hidden absolute bottom-2 left-11 z-30 bg-black/80 text-white text-xs font-mono font-bold h-7 px-2 rounded-full items-center justify-center">
+                                    1x
+                                </button>
+
+                                <!-- Botón de descarga -->
+                                <button onclick="downloadClip(event, '${videoId}', '${videoSrc}', '${safeTitle}')"
+                                        id="download-btn-${videoId}"
+                                        title="Descargar clip"
+                                        class="hidden absolute bottom-2 right-2 z-30 bg-black/80 hover:bg-green-500 hover:text-gray-950 text-white text-xs w-7 h-7 rounded-full items-center justify-center transition-colors">
+                                    ⬇️
+                                </button>
+
+                                <span class="absolute top-2 left-11 bg-black/80 text-xs px-2 py-1 rounded font-mono text-white font-bold backdrop-blur-sm pointer-events-none">
+                                    ⏱️ ${durationHtml}
+                                </span>
+                                <span class="absolute bottom-2 right-2 bg-gray-900/80 text-xs px-2 py-1 rounded text-gray-300 pointer-events-none clip-views-badge">
+                                    👀 ${views} vistas
+                                </span>
+                                <span class="absolute top-2 right-2 bg-purple-600/90 text-xs px-2 py-1 rounded text-white pointer-events-none">
+                                    🎮 ${category}
+                                </span>
+                            </div>
+                            <div class="p-4">
+                                <p class="block font-semibold text-lg text-white line-clamp-2">
+                                    ${title}
+                                </p>
+                                <p class="text-sm text-gray-400 mt-2">Creado por: <span class="text-gray-200 font-medium">${creator}</span></p>
+                                <button id="verdict-toggle-${clip.id}" onclick="toggleVerdictDetails('${clip.id}')"
+                                        class="hidden text-xs text-gray-400 hover:text-white mt-2 underline">
+                                    Ver análisis completo
+                                </button>
+                                <div id="verdict-details-${clip.id}" class="hidden text-xs text-gray-300 mt-2 bg-gray-900/60 rounded-lg p-3"></div>
+                            </div>
+                        </div>
+                        <div class="p-4 pt-0">
+                            <div class="text-xs text-gray-500 mb-3 flex justify-between items-center">
+                                <span>📅 Clip de la semana</span>
+                                <span class="text-green-400 font-medium">${timeAgo}</span>
+                            </div>
+                            <div class="flex gap-2">
+                                <a href="${kickClipUrl}" target="_blank" class="flex-1 bg-gray-700 hover:bg-green-500 hover:text-gray-950 text-white font-bold py-2 px-4 rounded-lg transition-colors text-sm flex items-center justify-center gap-1">
+                                    🚀 Abrir en Kick ↗
+                                </a>
+                                <button onclick="sendToRenderStudio('${clip.id}')"
+                                        id="render-btn-${clip.id}"
+                                        title="Enviar a Render Studio"
+                                        class="bg-gray-700 hover:bg-blue-500 hover:text-gray-950 text-white font-bold py-2 px-3 rounded-lg transition-colors text-sm flex items-center justify-center">
+                                    🎬
+                                </button>
+                                <button onclick="downloadClip(event, '${videoId}', '${videoSrc}', '${safeTitle}')"
+                                        id="download-btn-footer-${videoId}"
+                                        title="Descargar clip"
+                                        class="bg-gray-700 hover:bg-green-500 hover:text-gray-950 text-white font-bold py-2 px-3 rounded-lg transition-colors text-sm flex items-center justify-center">
+                                    ⬇️
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                clipsContainer.innerHTML += clipCard;
+            });
+        }
+
+        // --- Reproducción de previews ---
+        const hlsInstances = {};
+        const SPEEDS = [1, 1.5, 2, 3];
+        const speedIndex = {}; // videoId -> índice actual en SPEEDS
+        let activeMobileVideoId = null; // solo un video suena a la vez en mobile
+
+        function loadVideo(videoId, src, attemptUnmuted) {
+            const video = document.getElementById(videoId);
+            if (!video) return;
+
+            const tryPlay = () => {
+                video.muted = !attemptUnmuted;
+                video.playbackRate = SPEEDS[speedIndex[videoId] || 0];
+                video.play().then(() => {
+                    updateMuteIcon(videoId, video.muted);
+                }).catch(() => {
+                    // el navegador bloqueó el audio: forzamos muted y reintentamos
+                    video.muted = true;
+                    updateMuteIcon(videoId, true);
+                    video.play().catch(() => {});
+                });
+            };
+
+            if (!hlsInstances[videoId]) {
+                if (Hls.isSupported()) {
+                    const hls = new Hls();
+                    hls.loadSource(src);
+                    hls.attachMedia(video);
+                    // Clave: esperar a que el manifest esté listo antes de reproducir,
+                    // si no el play() se ejecuta sin datos y falla en silencio.
+                    hls.on(Hls.Events.MANIFEST_PARSED, tryPlay);
+                    hlsInstances[videoId] = hls;
+                } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = src; // Safari soporta HLS nativo
+                    video.addEventListener('loadedmetadata', tryPlay, { once: true });
+                }
+            } else {
+                tryPlay(); // ya estaba cargado, solo reanudar
+            }
+        }
+
+        // --- Click para reproducir/pausar (antes era hover en desktop + tap en mobile) ---
+        function handleClick(videoId, src) {
+            if (activeMobileVideoId && activeMobileVideoId !== videoId) {
+                const prevVideo = document.getElementById(activeMobileVideoId);
+                if (prevVideo) prevVideo.pause();
+                document.getElementById(`mute-btn-${activeMobileVideoId}`).classList.add('hidden');
+                document.getElementById(`speed-btn-${activeMobileVideoId}`).classList.add('hidden');
+                document.getElementById(`download-btn-${activeMobileVideoId}`).classList.add('hidden');
+            }
+
+            const video = document.getElementById(videoId);
+            if (!video) return;
+
+            if (video.paused) {
+                loadVideo(videoId, src, true); // el click es gesto válido: audio directo
+                const btn = document.getElementById(`mute-btn-${videoId}`);
+                btn.classList.remove('hidden');
+                btn.classList.add('flex');
+                const speedBtn = document.getElementById(`speed-btn-${videoId}`);
+                speedBtn.classList.remove('hidden');
+                speedBtn.classList.add('flex');
+                const downloadBtn = document.getElementById(`download-btn-${videoId}`);
+                downloadBtn.classList.remove('hidden');
+                downloadBtn.classList.add('flex');
+                activeMobileVideoId = videoId;
+            } else {
+                video.pause();
+                document.getElementById(`mute-btn-${videoId}`).classList.add('hidden');
+                document.getElementById(`speed-btn-${videoId}`).classList.add('hidden');
+                document.getElementById(`download-btn-${videoId}`).classList.add('hidden');
+                if (activeMobileVideoId === videoId) activeMobileVideoId = null;
+            }
+        }
+
+        function toggleMute(event, videoId) {
+            event.stopPropagation();
+            const video = document.getElementById(videoId);
+            video.muted = !video.muted;
+            updateMuteIcon(videoId, video.muted);
+        }
+
+        function cycleSpeed(event, videoId) {
+            event.stopPropagation();
+            const video = document.getElementById(videoId);
+            const currentIndex = speedIndex[videoId] || 0;
+            const nextIndex = (currentIndex + 1) % SPEEDS.length;
+            speedIndex[videoId] = nextIndex;
+            if (video) video.playbackRate = SPEEDS[nextIndex];
+
+            const btn = document.getElementById(`speed-btn-${videoId}`);
+            if (btn) btn.textContent = `${SPEEDS[nextIndex]}x`;
+        }
+
+        function updateMuteIcon(videoId, muted) {
+            const btn = document.getElementById(`mute-btn-${videoId}`);
+            if (btn) btn.textContent = muted ? '🔇' : '🔊';
+        }
+
+        // Remuxea una lista de segmentos .ts a un único .mp4 usando mux.js, la misma
+        // librería que usa hls.js internamente para alimentar el <video> con MSE.
+        // Por diseño, reescribe los timestamps de cada segmento para que la línea de
+        // tiempo sea continua y arranque en 0 (justo lo que necesitamos: evita que el
+        // clip termine "inflado" por los timestamps discontinuos heredados del stream
+        // en vivo). Es JS puro (sin WASM), así que no hay descarga pesada ni requiere
+        // SharedArrayBuffer/headers especiales en el sitio.
+        function remuxSegmentsToMp4(segmentBuffers, onProgress) {
+            return new Promise((resolve, reject) => {
+                try {
+                    const transmuxer = new muxjs.mp4.Transmuxer();
+                    let initSegment = null;
+                    const dataParts = [];
+
+                    transmuxer.on('data', (segment) => {
+                        if (segment.initSegment && !initSegment) {
+                            initSegment = segment.initSegment;
+                        }
+                        dataParts.push(segment.data);
+                    });
+
+                    transmuxer.on('done', () => {
+                        const parts = initSegment ? [initSegment, ...dataParts] : dataParts;
+                        if (parts.length === 0) {
+                            reject(new Error('mux.js no generó ningún segmento MP4 (formato de audio/video no reconocido)'));
+                            return;
+                        }
+                        resolve(new Blob(parts, { type: 'video/mp4' }));
+                    });
+
+                    segmentBuffers.forEach((buf, i) => {
+                        transmuxer.push(new Uint8Array(buf));
+                        if (onProgress) onProgress((i + 1) / segmentBuffers.length);
+                    });
+                    transmuxer.flush();
+                } catch (err) {
+                    reject(err);
+                }
+            });
+        }
+
+        // Envuelve una URL externa para que pase por el proxy del Worker (evita CORS)
+        function proxied(url) {
+            return `${WORKER_BASE_URL}proxy?url=${encodeURIComponent(url)}`;
+        }
+
+        // --- Descarga de clips (une los segmentos del HLS en un solo archivo) ---
+        // Construye el archivo mp4 final de un clip (une segmentos HLS,
+        // remuxea si hace falta). Reusada por downloadClip() y por el botón
+        // "Renderizar" (que manda el blob a render-studio.html en vez de
+        // descargarlo directo).
+        async function buildClipBlob(m3u8Url, onProgress) {
+            const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
+
+            // 1. Descargar y parsear el playlist m3u8 (vía proxy para evitar CORS)
+            const playlistRes = await fetch(proxied(m3u8Url));
+            if (!playlistRes.ok) {
+                throw new Error(`No se pudo obtener el playlist (HTTP ${playlistRes.status}). Revisa que el Worker tenga desplegada la ruta /proxy.`);
+            }
+            const playlistText = await playlistRes.text();
+            const lines = playlistText.split('\n').map(l => l.trim()).filter(Boolean);
+
+            // Si el playlist referencia otro playlist (variante de calidad), lo seguimos
+            const variantLine = lines.find(l => !l.startsWith('#') && l.includes('.m3u8'));
+            let actualPlaylistLines = lines;
+            let actualBaseUrl = baseUrl;
+            if (variantLine && !lines.some(l => l.startsWith('#EXTINF'))) {
+                const variantUrl = new URL(variantLine, baseUrl).href;
+                const variantRes = await fetch(proxied(variantUrl));
+                const variantText = await variantRes.text();
+                actualPlaylistLines = variantText.split('\n').map(l => l.trim()).filter(Boolean);
+                actualBaseUrl = variantUrl.substring(0, variantUrl.lastIndexOf('/') + 1);
+            }
+
+            // Detectar segmento de inicialización (fragmented MP4)
+            const mapLine = actualPlaylistLines.find(l => l.startsWith('#EXT-X-MAP'));
+            let initUrl = null;
+            if (mapLine) {
+                const match = mapLine.match(/URI="([^"]+)"/);
+                if (match) initUrl = new URL(match[1], actualBaseUrl).href;
+            }
+
+            // Extraer segmentos, respetando #EXT-X-BYTERANGE cuando existe.
+            // Kick empaqueta varios segmentos dentro de un mismo archivo .ts,
+            // así que el mismo nombre de archivo puede repetirse con distintos
+            // rangos de bytes. Si no leemos el BYTERANGE, terminamos descargando
+            // el archivo COMPLETO cada vez (mucho más contenido del que corresponde
+            // al clip), lo que infla brutalmente la duración final.
+            const lastRangeEndByUri = {};
+            let pendingRange = null; // { length, offset|null } para la próxima URI
+            const segments = []; // { url, range: {start, length} | null }
+
+            for (const line of actualPlaylistLines) {
+                if (line.startsWith('#EXT-X-BYTERANGE')) {
+                    const value = line.split(':')[1] || '';
+                    const [lengthStr, offsetStr] = value.split('@');
+                    pendingRange = {
+                        length: parseInt(lengthStr, 10),
+                        offset: offsetStr !== undefined ? parseInt(offsetStr, 10) : null
+                    };
+                } else if (!line.startsWith('#')) {
+                    const url = new URL(line, actualBaseUrl).href;
+                    let range = null;
+                    if (pendingRange) {
+                        const start = pendingRange.offset !== null
+                            ? pendingRange.offset
+                            : (lastRangeEndByUri[url] || 0);
+                        range = { start, length: pendingRange.length };
+                        lastRangeEndByUri[url] = start + pendingRange.length;
+                    }
+                    segments.push({ url, range });
+                    pendingRange = null;
+                }
+            }
+
+            if (segments.length === 0) throw new Error('No se encontraron segmentos de video');
+
+            // 2. Descargar todos los fragmentos (vía proxy, respetando el Range,
+            // en paralelo para mayor velocidad)
+            let initBuffer = null;
+            if (initUrl) {
+                const initRes = await fetch(proxied(initUrl));
+                if (!initRes.ok) throw new Error(`Falló la descarga del segmento de init (HTTP ${initRes.status})`);
+                initBuffer = await initRes.arrayBuffer();
+            }
+            const segmentBuffers = await Promise.all(
+                segments.map(async (seg) => {
+                    const headers = {};
+                    if (seg.range) {
+                        headers['Range'] = `bytes=${seg.range.start}-${seg.range.start + seg.range.length - 1}`;
+                    }
+                    const res = await fetch(proxied(seg.url), { headers, cache: 'no-store' });
+                    if (!res.ok) throw new Error(`Falló la descarga de un segmento (HTTP ${res.status}): ${seg.url}`);
+                    return res.arrayBuffer();
+                })
+            );
+
+            // 3. Generar el archivo final
+            const isMp4 = !!initUrl || segments[0].url.endsWith('.mp4') || segments[0].url.endsWith('.m4s');
+
+            if (isMp4) {
+                // Ya viene en fMP4 (CMAF): los fragmentos SÍ están diseñados para
+                // concatenarse en bytes crudos manteniendo timestamps continuos.
+                const buffers = initBuffer ? [initBuffer, ...segmentBuffers] : segmentBuffers;
+                return new Blob(buffers, { type: 'video/mp4' });
+            }
+
+            // Es MPEG-TS: usamos mux.js para remuxear a fMP4 con timestamps
+            // realineados (evita el "video más largo de lo debido").
+            return remuxSegmentsToMp4(segmentBuffers, onProgress);
+        }
+
+        // --- Traspaso de datos a render-studio.html vía IndexedDB ---
+        // (el video puede pesar varios MB — localStorage no alcanza, así que
+        // usamos IndexedDB, que sí soporta Blobs nativamente sin límite práctico)
+        function openRenderDB() {
+            return new Promise((resolve, reject) => {
+                const req = indexedDB.open('streamradar_render_handoff', 1);
+                req.onupgradeneeded = () => {
+                    if (!req.result.objectStoreNames.contains('payload')) {
+                        req.result.createObjectStore('payload');
+                    }
+                };
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+        }
+
+        async function saveRenderPayload(payload) {
+            const db = await openRenderDB();
+            return new Promise((resolve, reject) => {
+                const tx = db.transaction('payload', 'readwrite');
+                tx.objectStore('payload').put(payload, 'pending');
+                tx.oncomplete = () => resolve();
+                tx.onerror = () => reject(tx.error);
+            });
+        }
+
+        async function sendToRenderStudio(clipId) {
+            const clip = clipsById[clipId];
+            if (!clip) return;
+            const analysis = analysisResultsById[clipId];
+
+            const btn = document.getElementById(`render-btn-${clipId}`);
+            const originalText = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+
+            // IMPORTANTE: abrimos la pestaña YA, de forma síncrona, antes de
+            // cualquier await. Si abrimos después de esperar (armar el blob
+            // tarda unos segundos), el navegador ya no lo considera un gesto
+            // de usuario directo y bloquea el popup en silencio.
+            const renderWindow = window.open('render-studio.html', '_blank');
+            if (!renderWindow) {
+                alert('El navegador bloqueó la ventana emergente. Permite pop-ups para este sitio e intenta de nuevo.');
+                if (btn) { btn.disabled = false; btn.textContent = originalText; }
+                return;
+            }
+
+            try {
+                const blob = await buildClipBlob(clip.clip_url, (ratio) => {
+                    if (btn) btn.textContent = `${Math.min(99, Math.round(ratio * 100))}%`;
+                });
+
+                if (!(blob instanceof Blob) || blob.size === 0) {
+                    throw new Error('El clip se descargó pero quedó vacío (0 bytes) — probablemente falló '
+                        + 'la descarga de algún segmento del proxy. Revisa la consola (F12) para más detalle.');
+                }
+
+                await saveRenderPayload({
+                    blob,
+                    streamer: clip.streamer || '',
+                    title_overlay: (analysis && analysis.title_overlay) || clip.title || '',
+                    title_tiktok: (analysis && analysis.title_tiktok) || clip.title || '',
+                    hashtags: (analysis && analysis.hashtags) || [],
+                });
+
+                // Avisamos a la pestaña de render por si ya cargó y no
+                // encontró nada en su primer chequeo (carrera de tiempos:
+                // ella suele terminar de cargar antes de que el blob esté listo).
+                try {
+                    const channel = new BroadcastChannel('render_handoff');
+                    channel.postMessage('payload-ready');
+                    channel.close();
+                } catch (e) {
+                    // BroadcastChannel no disponible en algún navegador viejo: no bloqueante
+                }
+
+            } catch (error) {
+                console.error('Error preparando el render:', error);
+                alert(`No se pudo preparar el clip para Render Studio:\n\n${error.message || error}`);
+                try { renderWindow.close(); } catch (e) {}
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = originalText; }
+            }
+        }
+
+
+        async function downloadClip(event, videoId, m3u8Url, title) {
+            event.stopPropagation();
+            event.preventDefault();
+
+            const btns = [
+                document.getElementById(`download-btn-${videoId}`),
+                document.getElementById(`download-btn-footer-${videoId}`)
+            ].filter(Boolean);
+
+            const originalTexts = btns.map(b => b.textContent);
+            btns.forEach(b => { b.textContent = '⏳'; b.disabled = true; });
+
+            try {
+                const finalBlob = await buildClipBlob(m3u8Url, (ratio) => {
+                    const pct = Math.min(99, Math.round(ratio * 100));
+                    btns.forEach(b => { b.textContent = `${pct}%`; });
+                });
+
+                const url = URL.createObjectURL(finalBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${title.replace(/[^a-z0-9]/gi, '_').substring(0, 60) || 'clip'}.mp4`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+                btns.forEach(b => { b.textContent = '✅'; });
+                setTimeout(() => {
+                    btns.forEach((b, i) => { b.textContent = originalTexts[i]; b.disabled = false; });
+                }, 2000);
+
+            } catch (error) {
+                console.error('Error al descargar el clip:', error);
+                alert(`No se pudo descargar/convertir el clip:\n\n${error.message || error}`);
+                btns.forEach((b, i) => { b.textContent = originalTexts[i]; b.disabled = false; });
+            }
+        }
+
+        searchForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const targetStreamer = searchInput.value;
+            if (targetStreamer.trim() !== '') {
+                fetchClips(targetStreamer);
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', () => {
+            renderStreamerList();
+            fetchClips(searchInput.value);
+        });
+    </script>
+</body>
+</html>
