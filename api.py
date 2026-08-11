@@ -1,6 +1,6 @@
 """
-API HTTP para el análisis de clips cortos con Gemini, conectada al
-dashboard (public/dashboard-clips-kick.html) y Render Studio
+API HTTP para el análisis de clips cortos con Gemini y Renderizado con FFmpeg,
+conectada al dashboard (public/dashboard-clips-kick.html) y Render Studio
 (public/render-studio.html).
 
 Instalación:
@@ -9,49 +9,23 @@ Instalación:
 Uso:
     export GOOGLE_API_KEY="tu-api-key"
     uvicorn api:app --host 0.0.0.0 --port 8000
-
-Luego abre http://localhost:8000/dashboard-clips-kick.html (o la IP de tu
-PC en la red local para usarlo desde el celular — ver README).
-
-Endpoints:
-    POST /analyze_clips
-        body JSON: [{ "id", "title", "clip_url", "duration", "category", "streamer" }, ...]
-        -> { "job_id": "..." }
-        Analiza cada clip con Gemini multimodal (video+audio nativo, sin
-        transcripción previa), devolviendo un análisis independiente por
-        clip (score, título overlay, título TikTok, hashtags). No compara
-        clips entre sí.
-
-    GET /analyze_status/{job_id}
-        -> { "status": "queued"|"processing"|"done"|"error",
-             "results": [{ "id", "score", "analysis", "title_overlay",
-                            "title_tiktok", "hashtags", "full_text", "error" }, ...],
-             "progress": "3/10", "error": null }
-        "results" se va llenando progresivamente a medida que cada clip
-        termina, así que puedes hacer polling y mostrar resultados parciales.
-
-Notas sobre esta versión (MVP):
-- Los jobs se guardan en memoria (dict) — si reinicias el servidor, se
-  pierde el registro de jobs anteriores.
-- Un solo proceso corriendo (uvicorn sin --workers) procesa los jobs uno
-  por uno, no en paralelo real. Suficiente para uso personal; para varios
-  usuarios concurrentes convendría una cola real (Celery/RQ) más adelante.
-- CORS está abierto a "*" para probar fácil. Restringe esto a tu dominio
-  real antes de exponerlo público de verdad.
 """
+
 import json
 import os
+import subprocess
 import traceback
 import uuid
-from typing import List
+from typing import List, Optional
 
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Body
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Body, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from gemini_clip_analyzer import analyze_clip as gemini_analyze_clip
 
-app = FastAPI(title="Clip Analyzer API")
+app = FastAPI(title="Clip Analyzer & Render API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,17 +34,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# job_id -> {"status":..., "results": [...], "progress": "i/n", "error": None}
-ANALYZE_JOBS: dict = {}
+# Carpetas de trabajo para renderizado
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
+# Jobs en memoria
+ANALYZE_JOBS: dict = {}
+RENDER_JOBS: dict = {}
+
+
+# --- SECCIÓN 1: ANÁLISIS CON GEMINI ---
 
 def _process_analyze_job(job_id: str, clips: list):
-    """
-    Analiza cada clip de la lista con Gemini, uno por uno. No compara clips
-    entre sí — cada uno recibe un análisis independiente. Actualizamos
-    ANALYZE_JOBS progresivamente para que el frontend pueda hacer polling y
-    ver resultados a medida que van llegando.
-    """
     import time as time_module
 
     try:
@@ -91,7 +68,7 @@ def _process_analyze_job(job_id: str, clips: list):
             ANALYZE_JOBS[job_id]["progress"] = f"{i}/{len(clips)}"
 
             if i < len(clips):
-                time_module.sleep(2.0)  # no saturar la API de Gemini
+                time_module.sleep(2.0)
 
         ANALYZE_JOBS[job_id]["status"] = "done"
 
@@ -103,12 +80,6 @@ def _process_analyze_job(job_id: str, clips: list):
 
 @app.post("/analyze_clips")
 async def analyze_clips_endpoint(background_tasks: BackgroundTasks, clips: List[dict] = Body(...)):
-    """
-    Recibe una lista de clips seleccionados desde el dashboard (mismo
-    formato que devuelve la API de Kick: id, title, clip_url, duration,
-    category, channel) y le pide a Gemini un análisis independiente por
-    cada uno.
-    """
     if not clips:
         raise HTTPException(400, "Manda al menos un clip en la lista")
 
@@ -127,13 +98,117 @@ async def analyze_status(job_id: str):
     return job
 
 
-# --- Presets de encuadre por streamer (Render Studio) ---
-# Guarda la posición/zoom de cámara + layout elegido para cada streamer, en
-# un JSON en disco (no una base de datos real — para uso personal alcanza,
-# y así sobrevive a reinicios del servidor a diferencia de los jobs en
-# memoria). Al guardarlo en el servidor (en vez de localStorage del
-# navegador) se sincroniza solo entre la PC y el celular, ya que ambos le
-# pegan al mismo servidor.
+# --- SECCIÓN 2: RENDERIZADO EN EL SERVIDOR CON FFMPEG ---
+
+def _process_render_job(
+    job_id: str, 
+    input_path: str, 
+    output_path: str, 
+    layout: str, 
+    trim_start: float, 
+    trim_end: float, 
+    streamer: str, 
+    resolution: str
+):
+    try:
+        RENDER_JOBS[job_id]["status"] = "processing"
+
+        target_w = 1080 if resolution == "1080" else 720
+        target_h = 1920 if resolution == "1080" else 1280
+
+        # Filtro de FFmpeg: Recorte Split-Screen + Superposición de Texto
+        filter_complex = (
+            f"[0:v]trim=start={trim_start}:end={trim_end},setpts=PTS-STARTPTS[v_trimmed];"
+            f"[v_trimmed]split=2[cam][game];"
+            f"[cam]crop=iw:ih/2:0:0,scale={target_w}:{target_h//2}[top];"
+            f"[game]crop=iw:ih/2:0:ih/2,scale={target_w}:{target_h//2}[bottom];"
+            f"[top][bottom]vstack=inputs=2[v_stacked];"
+            f"[v_stacked]drawtext=text='{streamer.upper()}':fontcolor=white:fontsize=48:x=(w-text_w)/2:y=h-100[v_final]"
+        )
+
+        cmd = [
+            'ffmpeg', '-y',
+            '-i', input_path,
+            '-filter_complex', filter_complex,
+            '-map', '[v_final]',
+            '-map', '0:a?',
+            '-c:v', 'libx264',
+            '-preset', 'fast',
+            '-crf', '23',
+            '-c:a', 'aac',
+            output_path
+        ]
+
+        subprocess.run(cmd, check=True)
+
+        RENDER_JOBS[job_id]["status"] = "done"
+        RENDER_JOBS[job_id]["output_url"] = f"/download_render/{job_id}"
+
+    except Exception as e:
+        RENDER_JOBS[job_id]["status"] = "error"
+        RENDER_JOBS[job_id]["error"] = str(e)
+        traceback.print_exc()
+    finally:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+
+
+@app.post("/render_video")
+async def render_video_endpoint(
+    background_tasks: BackgroundTasks,
+    video: UploadFile = File(...),
+    layout: str = Form("streamer"),
+    trimStart: float = Form(0.0),
+    trimEnd: float = Form(0.0),
+    streamer: str = Form("streamer"),
+    resolution: str = Form("1080")
+):
+    job_id = str(uuid.uuid4())
+    input_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{video.filename}")
+    output_path = os.path.join(OUTPUT_FOLDER, f"rendered_{job_id}.mp4")
+
+    with open(input_path, "wb") as f:
+        f.write(await video.read())
+
+    RENDER_JOBS[job_id] = {
+        "status": "queued",
+        "output_url": None,
+        "error": None
+    }
+
+    background_tasks.add_task(
+        _process_render_job,
+        job_id,
+        input_path,
+        output_path,
+        layout,
+        trimStart,
+        trimEnd,
+        streamer,
+        resolution
+    )
+
+    return {"job_id": job_id}
+
+
+@app.get("/render_status/{job_id}")
+async def render_status(job_id: str):
+    job = RENDER_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "job_id de renderizado no encontrado")
+    return job
+
+
+@app.get("/download_render/{job_id}")
+async def download_render(job_id: str):
+    output_path = os.path.join(OUTPUT_FOLDER, f"rendered_{job_id}.mp4")
+    if not os.path.exists(output_path):
+        raise HTTPException(404, "El archivo procesado no existe o venció")
+    return FileResponse(output_path, media_type="video/mp4", filename=f"clip_{job_id}.mp4")
+
+
+# --- SECCIÓN 3: PRESETS DE ENCUADRE POR STREAMER ---
+
 STREAMER_PRESETS_FILE = "streamer_presets.json"
 
 
@@ -181,19 +256,8 @@ async def delete_streamer_preset(streamer: str):
     return {"status": "ok"}
 
 
-# --- Archivos estáticos (dashboard, render-studio, banners/logos) ---
-# IMPORTANTE: este mount va AL FINAL, después de declarar todas las rutas
-# de la API de arriba. FastAPI prioriza las rutas explícitas (@app.get/
-# @app.post) sobre lo que cae dentro del mount, así que /analyze_clips y
-# /analyze_status siguen funcionando normal aunque "/" también sirva
-# archivos estáticos.
-#
-# Poné dashboard-clips-kick.html, render-studio.html, y cualquier logo/
-# banner (ej. streamradar_logo.png, daarick.jpg) dentro de una carpeta
-# "public/" al lado de api.py. Así todo —API y frontend— sale del mismo
-# servidor/puerto, lo cual es necesario para que funcione desde el celular
-# (ver README) y también evita el problema de "file:// URLs are treated as
-# unique security origins" que rompe el IndexedDB entre dashboard y
-# render-studio si los abrís con doble clic en vez de por HTTP.
+# --- ARCHIVOS ESTÁTICOS ---
+
 if os.path.isdir("public"):
     app.mount("/", StaticFiles(directory="public", html=True), name="static")
+
