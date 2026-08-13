@@ -1,11 +1,12 @@
 # Imagen base liviana con Python 3.11
 FROM python:3.11-slim
 
-# ffmpeg es necesario para descargar/remuxear los clips (m3u8 -> mp4)
-# antes de subirlos a Gemini. --no-install-recommends para mantener la
-# imagen chica.
+# ffmpeg: descarga/remux de clips y renderizado server-side (drawtext,
+# crop, overlay, etc). fonts-dejavu-core: fuente usada por el renderizador
+# para los textos superpuestos (título, badge, banner) — ver clip_renderer.py.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
