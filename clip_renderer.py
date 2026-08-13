@@ -181,17 +181,9 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> Tuple[str, L
         pX = min(max(params.region_a.x, 0), 100) / 100
         pY = min(max(params.region_a.y, 0), 100) / 100
 
-        # ⚡ OPTIMIZACIÓN DE BLUR DE ALTO IMPACTO:
-        # 1. Escala a 270x480 (16x menos píxeles a procesar)
-        # 2. Aplica boxblur en lugar de gblur (mucho más liviano para la CPU)
-        # 3. Escala de vuelta al canvas 1080x1920
-        low_w, low_h = 270, 480
         filters.append(
-            f"[0:v]scale={low_w}:{low_h}:force_original_aspect_ratio=increase,"
-            f"crop={low_w}:{low_h},"
-            f"boxblur=luma_radius=10:luma_power=2,"
-            f"scale={W}:{H},"
-            f"eq=brightness=-0.35:saturation=1.4[bg]"
+            f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},gblur=sigma=20,eq=brightness=-0.35:saturation=1.4[bg]"
         )
 
         src_w = round(vW / zoom)
@@ -272,28 +264,23 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> Tuple[str, L
     return ";\n".join(filters), extra_inputs
 
 
-# Modifica tu archivo clip_renderer.py en render_clip():
-import time
-
 def render_clip(params: RenderParams, output_path: str) -> str:
-    t0 = time.time()
     video_path = params.clip_url
     downloaded_locally = False
 
     try:
         if is_stream_url(params.clip_url):
-            print("⏳ Descargando video fuente...")
             video_path = download_stream(
                 params.clip_url, output_dir="tmp_render",
                 filename="source.mp4",
-                referer=params.referer, user_agent=params.user_agent,)
+                referer=params.referer, user_agent=params.user_agent,
+            )
             downloaded_locally = True
-            print(f"✅ Descarga completada en {round(time.time() - t0, 2)}s")
 
-        t_render = time.time()
         vW, vH = _ffprobe_dimensions(video_path)
         filter_complex, extra_inputs = build_filter_complex(params, vW, vH)
 
+        # ⚡ -threads 1 previene picos de memoria RAM de FFmpeg en servidores de 512MB
         cmd = ["ffmpeg", "-y", "-threads", "1"]
 
         if params.trim_start is not None:
@@ -301,6 +288,7 @@ def render_clip(params: RenderParams, output_path: str) -> str:
 
         cmd += ["-i", video_path]
 
+        # Añadir inputs de imágenes extras (Logo, Banner)
         for extra_in in extra_inputs:
             cmd += ["-i", extra_in]
 
@@ -310,16 +298,16 @@ def render_clip(params: RenderParams, output_path: str) -> str:
         cmd += [
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "0:a?",
-            "-r", "30",  # ⚡ NUEVO: Forzar 30 FPS para procesar la mitad de fotogramas
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
-            "-c:a", "aac", "-b:a", "96k",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             output_path,
         ]
 
-        print("⚡ Iniciando procesamiento FFmpeg...")
-        subprocess.run(cmd, capture_output=True, text=True)
-        print(f"🎉 Renderizado finalizado en {round(time.time() - t_render, 2)}s (Tiempo total: {round(time.time() - t0, 2)}s)")
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg falló renderizando:\n{result.stderr[-3000:]}")
 
         return output_path
 
