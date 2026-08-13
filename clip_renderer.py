@@ -181,9 +181,17 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> Tuple[str, L
         pX = min(max(params.region_a.x, 0), 100) / 100
         pY = min(max(params.region_a.y, 0), 100) / 100
 
+        # ⚡ OPTIMIZACIÓN DE BLUR DE ALTO IMPACTO:
+        # 1. Escala a 270x480 (16x menos píxeles a procesar)
+        # 2. Aplica boxblur en lugar de gblur (mucho más liviano para la CPU)
+        # 3. Escala de vuelta al canvas 1080x1920
+        low_w, low_h = 270, 480
         filters.append(
-            f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-            f"crop={W}:{H},gblur=sigma=20,eq=brightness=-0.35:saturation=1.4[bg]"
+            f"[0:v]scale={low_w}:{low_h}:force_original_aspect_ratio=increase,"
+            f"crop={low_w}:{low_h},"
+            f"boxblur=luma_radius=10:luma_power=2,"
+            f"scale={W}:{H},"
+            f"eq=brightness=-0.35:saturation=1.4[bg]"
         )
 
         src_w = round(vW / zoom)
