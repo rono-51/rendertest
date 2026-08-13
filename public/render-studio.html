@@ -516,8 +516,17 @@ body {
       </div>
 
       <button class="btn-export" id="btn-export" disabled>
-        ▶ Exportar clip vertical
+        ▶ Exportar clip vertical (en este dispositivo)
       </button>
+
+      <!-- Renderizado en el servidor: usa ffmpeg en el backend en vez de
+           canvas+MediaRecorder acá. Por ahora solo soporta los layouts
+           "Streamer Cam" y "Full Frame" — para el resto, usa el botón de
+           arriba mientras se agregan. -->
+      <button class="btn-export" id="btn-render-server" disabled style="margin-top:8px; background:linear-gradient(135deg,#3b82f6,#2563eb);">
+        🖥️ Renderizar en el servidor
+      </button>
+      <div class="sl-hint" id="server-render-status" style="margin-top:4px;"></div>
 
       <!-- Barra de progreso -->
       <div class="prog-wrap" id="prog-wrap">
@@ -636,6 +645,7 @@ const LAYOUTS = {
 };
 
 let currentLayoutKey = 'streamer';
+let currentClipUrl = null; // URL original del clip (para el render en servidor)
 
 /* ═══════════════════════════════════════════════════════
    FUENTE + IMÁGENES
@@ -686,6 +696,8 @@ const API_URL = window.location.origin;
 const slSplit     = document.getElementById('sl-split');
 const svSplit     = document.getElementById('sv-split');
 const btnExport   = document.getElementById('btn-export');
+const btnRenderServer     = document.getElementById('btn-render-server');
+const serverRenderStatus  = document.getElementById('server-render-status');
 const btnDl       = document.getElementById('btn-dl');
 const btnShare    = document.getElementById('btn-share');
 const progWrap    = document.getElementById('prog-wrap');
@@ -789,6 +801,7 @@ function selectLayout(key) {
     activeZone = 'A';
   }
   loadBannerForStreamer();
+  updateServerRenderButtonState();
   requestRedraw();
 }
 
@@ -857,6 +870,7 @@ function loadFile(file) {
 
   video.onloadedmetadata = () => {
     btnExport.disabled = false;
+    updateServerRenderButtonState();
     btnPlay.disabled = false;
     btnPlay.textContent = '▶ Reproducir';
     prevTime.textContent = `0:00 / ${fmtDur(video.duration)}`;
@@ -934,6 +948,12 @@ async function consumePendingRenderPayload() {
     if (payload.title_overlay) txtTitle.value = payload.title_overlay;
     if (payload.title_tiktok) txtTiktok.value = payload.title_tiktok;
     if (payload.hashtags && payload.hashtags.length) txtHashtags.value = payload.hashtags.join(' ');
+
+    // Guardamos el clip_url original: el renderizado en servidor vuelve a
+    // descargar el clip desde ahí (no manda el Blob, que ya usamos para el
+    // preview local).
+    currentClipUrl = payload.clip_url || null;
+    updateServerRenderButtonState();
 
     // Si hay un preset de encuadre guardado para este streamer, lo aplicamos
     // automáticamente (layout + zoom/posición de cámara) — así no hay que
@@ -1676,6 +1696,111 @@ document.addEventListener('visibilitychange', () => {
      TikTok, que acepta 23–60fps).
 ═══════════════════════════════════════════════════════ */
 btnExport.addEventListener('click', startExport);
+
+/* ═══════════════════════════════════════════════════════
+   RENDERIZADO EN EL SERVIDOR (ffmpeg en el backend, en vez de
+   canvas+MediaRecorder acá — esto es lo que evita usar la GPU/CPU del
+   celular para componer/codificar el video final).
+
+   Solo soporta los layouts "streamer" y "blur" por ahora — ver
+   clip_renderer.py del lado del servidor.
+═══════════════════════════════════════════════════════ */
+const SERVER_RENDER_SUPPORTED_LAYOUTS = ['streamer', 'blur'];
+
+function updateServerRenderButtonState() {
+  const supported = SERVER_RENDER_SUPPORTED_LAYOUTS.includes(currentLayoutKey);
+  const hasClipUrl = !!currentClipUrl;
+  const hasVideo = !!(video.duration && video.duration > 0);
+
+  btnRenderServer.disabled = !(supported && hasClipUrl && hasVideo);
+
+  if (!hasClipUrl) {
+    serverRenderStatus.textContent = 'Este botón necesita que el clip venga del dashboard (usa "🎬 Renderizar" ahí).';
+  } else if (!supported) {
+    serverRenderStatus.textContent = `Layout "${LAYOUTS[currentLayoutKey]?.label || currentLayoutKey}" todavía no soportado en el servidor — usa "Exportar" (local) por ahora.`;
+  } else {
+    serverRenderStatus.textContent = '';
+  }
+}
+
+async function startServerRender() {
+  if (!currentClipUrl) {
+    serverRenderStatus.textContent = '⚠️ No hay clip_url disponible (¿lo abriste manualmente sin pasar por el dashboard?).';
+    return;
+  }
+
+  const body = {
+    clip_url: currentClipUrl,
+    layout: currentLayoutKey,
+    region_a: { ...regions.A },
+    region_b: { ...regions.B },
+    split_pct: splitPct,
+    title: txtTitle.value.trim(),
+    streamer: txtStreamer.value.trim(),
+    show_title: chkTitle.checked,
+    show_badge: chkBadge.checked,
+    show_banner: chkBanner.checked,
+  };
+  if (trimEnd > trimStart) {
+    body.trim_start = trimStart;
+    body.trim_end = trimEnd;
+  }
+
+  btnRenderServer.disabled = true;
+  const original = btnRenderServer.textContent;
+  btnRenderServer.textContent = '⏳ Enviando...';
+  serverRenderStatus.textContent = '';
+
+  try {
+    const res = await fetch(`${API_URL}/render_clip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const { job_id } = await res.json();
+    pollServerRenderStatus(job_id, original);
+  } catch (error) {
+    console.error('Error mandando el render al servidor:', error);
+    serverRenderStatus.textContent = `❌ ${error.message}`;
+    btnRenderServer.disabled = false;
+    btnRenderServer.textContent = original;
+  }
+}
+
+function pollServerRenderStatus(jobId, originalBtnText) {
+  const interval = setInterval(async () => {
+    try {
+      const res = await fetch(`${API_URL}/render_status/${jobId}`);
+      const data = await res.json();
+
+      if (data.status === 'queued' || data.status === 'processing') {
+        btnRenderServer.textContent = `⏳ Renderizando (${data.status})...`;
+      } else if (data.status === 'done') {
+        clearInterval(interval);
+        btnRenderServer.disabled = false;
+        btnRenderServer.textContent = originalBtnText;
+        serverRenderStatus.innerHTML =
+          `✅ Listo — <a href="${API_URL}${data.download_url}" download style="color:#3b82f6; text-decoration:underline;">descargar video renderizado</a>`;
+      } else if (data.status === 'error') {
+        clearInterval(interval);
+        btnRenderServer.disabled = false;
+        btnRenderServer.textContent = originalBtnText;
+        serverRenderStatus.textContent = `❌ Error del servidor: ${data.error}`;
+      }
+    } catch (error) {
+      clearInterval(interval);
+      btnRenderServer.disabled = false;
+      btnRenderServer.textContent = originalBtnText;
+      serverRenderStatus.textContent = `❌ Error de conexión: ${error.message}`;
+    }
+  }, 3000);
+}
+
+btnRenderServer.addEventListener('click', startServerRender);
 
 async function startExport() {
   if (!video.src) { setStatus('err', '❌ No hay video cargado.'); return; }
