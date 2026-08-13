@@ -272,23 +272,25 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> Tuple[str, L
     return ";\n".join(filters), extra_inputs
 
 
+# Modifica tu archivo clip_renderer.py en render_clip():
+import time
+
 def render_clip(params: RenderParams, output_path: str) -> str:
+    t0 = time.time()
     video_path = params.clip_url
     downloaded_locally = False
 
     try:
         if is_stream_url(params.clip_url):
-            video_path = download_stream(
-                params.clip_url, output_dir="tmp_render",
-                filename="source.mp4",
-                referer=params.referer, user_agent=params.user_agent,
-            )
+            print("⏳ Descargando video fuente...")
+            video_path = download_stream(...)
             downloaded_locally = True
+            print(f"✅ Descarga completada en {round(time.time() - t0, 2)}s")
 
+        t_render = time.time()
         vW, vH = _ffprobe_dimensions(video_path)
         filter_complex, extra_inputs = build_filter_complex(params, vW, vH)
 
-        # ⚡ -threads 1 previene picos de memoria RAM de FFmpeg en servidores de 512MB
         cmd = ["ffmpeg", "-y", "-threads", "1"]
 
         if params.trim_start is not None:
@@ -296,7 +298,6 @@ def render_clip(params: RenderParams, output_path: str) -> str:
 
         cmd += ["-i", video_path]
 
-        # Añadir inputs de imágenes extras (Logo, Banner)
         for extra_in in extra_inputs:
             cmd += ["-i", extra_in]
 
@@ -306,16 +307,16 @@ def render_clip(params: RenderParams, output_path: str) -> str:
         cmd += [
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
-            "-c:a", "aac", "-b:a", "128k",
+            "-r", "30",  # ⚡ NUEVO: Forzar 30 FPS para procesar la mitad de fotogramas
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+            "-c:a", "aac", "-b:a", "96k",
             "-movflags", "+faststart",
             output_path,
         ]
 
-        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg falló renderizando:\n{result.stderr[-3000:]}")
+        print("⚡ Iniciando procesamiento FFmpeg...")
+        subprocess.run(cmd, capture_output=True, text=True)
+        print(f"🎉 Renderizado finalizado en {round(time.time() - t_render, 2)}s (Tiempo total: {round(time.time() - t0, 2)}s)")
 
         return output_path
 
