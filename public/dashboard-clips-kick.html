@@ -805,6 +805,7 @@
 
                 await saveRenderPayload({
                     blob,
+                    clip_url: clip.clip_url,
                     streamer: clip.streamer || '',
                     title_overlay: (analysis && analysis.title_overlay) || clip.title || '',
                     title_tiktok: (analysis && analysis.title_tiktok) || clip.title || '',
