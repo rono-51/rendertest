@@ -283,7 +283,10 @@ def render_clip(params: RenderParams, output_path: str) -> str:
     try:
         if is_stream_url(params.clip_url):
             print("⏳ Descargando video fuente...")
-            video_path = download_stream(...)
+            video_path = download_stream(
+                params.clip_url, output_dir="tmp_render",
+                filename="source.mp4",
+                referer=params.referer, user_agent=params.user_agent,)
             downloaded_locally = True
             print(f"✅ Descarga completada en {round(time.time() - t0, 2)}s")
 
