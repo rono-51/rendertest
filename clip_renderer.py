@@ -1,69 +1,39 @@
-"""
-Renderizado de clips en el servidor con ffmpeg — reemplaza la exportación
-client-side (canvas + MediaRecorder) de render-studio.html, que usaba la
-GPU/CPU del dispositivo del usuario para componer y codificar el video.
-
-IMPORTANTE — alcance de esta primera versión: replica el motor de dibujo
-de render-studio.html (canvas 1080×1920) para DOS layouts:
-  - "streamer" (Streamer Cam: cam arriba + gameplay abajo)
-  - "blur"     (Full Frame: clip completo con fondo difuminado)
-
-Los otros 4 layouts (fill, casino, podcast, interview) NO están
-implementados todavía acá — si se piden, la función levanta un error claro
-en vez de renderizar algo incorrecto en silencio.
-
-Matemática de recorte replicada 1:1 desde el motor de canvas (ver
-drawCoverZone/drawBlurZone en render-studio.html):
-
-  cover-crop (zona rellena el rect, recorta sobrante):
-    scale = max(W/vW, zoneH/vH) * zoom
-    visible_src_w = W / scale
-    visible_src_h = zoneH / scale
-    crop_x = (vW - visible_src_w) * pX
-    crop_y = (vH - visible_src_h) * pY
-
-  contain-blur (clip completo, sin recortar, con blur de fondo):
-    fondo: video escalado a "cover" de todo el canvas, con blur+oscurecido
-    frente: crop de (vW/zoom, vH/zoom) en (pX,pY) del original, escalado
-            "contain" dentro de la zona y centrado
-
-Fuente: no tenemos el archivo Anton-Regular.ttf que usa el canvas del
-navegador — usamos DejaVu Sans Bold (viene con el paquete fonts-dejavu-core
-en el Dockerfile) como sustituto. El resultado se va a ver ligeramente
-distinto tipográficamente al preview del navegador hasta que subamos la
-fuente real a public/assets/fonts/ y actualicemos FONT_PATH acá.
-"""
 import json
 import os
 import subprocess
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Tuple
 
 from audio_utils import is_stream_url, download_stream
 
 CANVAS_W = 1080
 CANVAS_H = 1920
 
-# Sustituto de la fuente Anton del navegador (ver nota en el docstring).
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+# 📂 Rutas a tus Assets
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(BASE_DIR, "assets")
+FONT_PATH = os.path.join(ASSETS_DIR, "fonts", "Anton-Regular.ttf")
+LOGO_PATH = os.path.join(ASSETS_DIR, "logos", "streamradar_logo.png")
+BANNERS_DIR = os.path.join(ASSETS_DIR, "banners")
 
-KICK_GREEN = "0x53fc18"
+# Fuente de respaldo por si no se encuentra Anton-Regular.ttf
+DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 
 @dataclass
 class Region:
-    zoom: float = 10.0  # igual que en el canvas: zoom real = zoom/10
-    x: float = 50.0      # 0-100 (%)
-    y: float = 50.0      # 0-100 (%)
+    zoom: float = 10.0  # zoom real = zoom / 10
+    x: float = 50.0     # 0-100 (%)
+    y: float = 50.0     # 0-100 (%)
 
 
 @dataclass
 class RenderParams:
     clip_url: str
-    layout: str                       # "streamer" | "blur"
+    layout: str                         # "streamer" | "blur"
     region_a: Region = field(default_factory=Region)
     region_b: Region = field(default_factory=Region)
-    split_pct: float = 32.0           # solo aplica a "streamer"
+    split_pct: float = 32.0             # solo aplica a "streamer"
     title: str = ""
     streamer: str = ""
     show_title: bool = True
@@ -75,7 +45,12 @@ class RenderParams:
     user_agent: Optional[str] = None
 
 
-def _ffprobe_dimensions(video_path: str) -> tuple:
+def _make_even(val: int) -> int:
+    """Asegura que una dimensión sea par (requerido por pix_fmt yuv420p)."""
+    return round(val / 2) * 2
+
+
+def _ffprobe_dimensions(video_path: str) -> Tuple[int, int]:
     """Devuelve (width, height) del video de entrada."""
     cmd = [
         "ffprobe", "-v", "error",
@@ -93,12 +68,6 @@ def _ffprobe_dimensions(video_path: str) -> tuple:
 
 
 def _cover_crop(vW: int, vH: int, W: int, zoneH: int, region: Region) -> dict:
-    """
-    Calcula el crop (en píxeles del video ORIGINAL) equivalente al
-    "cover-crop" del canvas para una zona de tamaño W×zoneH.
-    Devuelve dict con crop_w/crop_h/crop_x/crop_y, ya clampeados a rangos
-    válidos.
-    """
     zoom = max(region.zoom, 1) / 10
     pX = min(max(region.x, 0), 100) / 100
     pY = min(max(region.y, 0), 100) / 100
@@ -109,7 +78,6 @@ def _cover_crop(vW: int, vH: int, W: int, zoneH: int, region: Region) -> dict:
     crop_x = (vW - crop_w) * pX
     crop_y = (vH - crop_h) * pY
 
-    # Clamps de seguridad: nunca pedir más de lo que el video tiene
     crop_w = min(crop_w, vW)
     crop_h = min(crop_h, vH)
     crop_x = min(max(crop_x, 0), vW - crop_w)
@@ -122,10 +90,10 @@ def _cover_crop(vW: int, vH: int, W: int, zoneH: int, region: Region) -> dict:
 
 
 def _escape_drawtext(text: str) -> str:
-    """Escapa texto para el filtro drawtext de ffmpeg."""
+    """Escapa caracteres especiales para el filtro drawtext de FFmpeg."""
     return (text.replace("\\", "\\\\")
                 .replace(":", "\\:")
-                .replace("'", "\u2019")   # reemplazo visual, evita romper el filtro
+                .replace("'", "\u2019")
                 .replace("%", "\\%"))
 
 
@@ -154,70 +122,70 @@ LAYOUTS = {
 }
 
 
-def build_filter_complex(params: RenderParams, vW: int, vH: int) -> str:
+def build_filter_complex(params: RenderParams, vW: int, vH: int) -> Tuple[str, List[str]]:
     """
-    Arma el grafo de filtros de ffmpeg completo para el layout pedido.
-    Devuelve el string listo para pasarle a -filter_complex.
+    Arma el grafo de filtros y retorna una tupla:
+    (filter_complex_string, lista_de_entradas_adicionales_de_imagenes)
     """
     if params.layout not in LAYOUTS:
-        raise ValueError(
-            f"Layout '{params.layout}' no implementado en el renderizador de servidor todavía "
-            f"(soportados: {list(LAYOUTS.keys())})"
-        )
+        raise ValueError(f"Layout '{params.layout}' no soportado aún.")
 
     W, H = CANVAS_W, CANVAS_H
     def_ = LAYOUTS[params.layout]
-    video_zone_h = round(def_["videoZoneH"] * (H / 1920))
+    video_zone_h = _make_even(round(def_["videoZoneH"] * (H / 1920)))
     bottom = _scale_bottom(def_["bottom"], H)
+    
     name = params.streamer.strip().upper()
+    streamer_clean = params.streamer.strip().lower().replace(" ", "")
     title = params.title.strip().upper()
 
+    # Seleccionar Fuente
+    active_font = FONT_PATH if os.path.exists(FONT_PATH) else DEFAULT_FONT
+    font_arg = active_font.replace("\\", "/").replace(":", "\\:")
+
+    # Verificar Entradas de Imágenes Extras
+    extra_inputs = []
+    banner_file = os.path.join(BANNERS_DIR, f"{streamer_clean}.jpg")
+    has_banner = params.show_banner and os.path.exists(banner_file)
+    has_logo = os.path.exists(LOGO_PATH)
+
     filters = []
-    last_label = None  # etiqueta del último frame compuesto, antes de overlays de texto
+    last_label = None
 
     if def_["mode"] == "dual":
-        split_y = round(video_zone_h * (params.split_pct / 100))
+        split_y = _make_even(round(video_zone_h * (params.split_pct / 100)))
         zone_a_h = split_y
         zone_b_h = video_zone_h - split_y
 
         crop_a = _cover_crop(vW, vH, W, zone_a_h, params.region_a)
         crop_b = _cover_crop(vW, vH, W, zone_b_h, params.region_b)
 
-        filters.append(
-            f"[0:v]crop={crop_a['w']}:{crop_a['h']}:{crop_a['x']}:{crop_a['y']},"
-            f"scale={W}:{zone_a_h}[zoneA]"
-        )
-        filters.append(
-            f"[0:v]crop={crop_b['w']}:{crop_b['h']}:{crop_b['x']}:{crop_b['y']},"
-            f"scale={W}:{zone_b_h}[zoneB]"
-        )
+        filters.append(f"[0:v]crop={crop_a['w']}:{crop_a['h']}:{crop_a['x']}:{crop_a['y']},scale={W}:{zone_a_h}[zoneA]")
+        filters.append(f"[0:v]crop={crop_b['w']}:{crop_b['h']}:{crop_b['x']}:{crop_b['y']},scale={W}:{zone_b_h}[zoneB]")
         filters.append("[zoneA][zoneB]vstack=inputs=2[stacked]")
         last_label = "stacked"
 
-        # Caption central en el punto de división (solo si hay título)
         if params.show_title and title:
             esc_title = _escape_drawtext(title)
             fontsize = round(40 * (W / 1080))
             filters.append(
-                f"[{last_label}]drawtext=fontfile={FONT_PATH}:text='{esc_title}':"
+                f"[{last_label}]drawtext=fontfile='{font_arg}':text='{esc_title}':"
                 f"fontsize={fontsize}:fontcolor=white:"
                 f"box=1:boxcolor=black@0.72:boxborderw=16:"
                 f"x=(w-text_w)/2:y={split_y}-(text_h/2)[capt]"
             )
             last_label = "capt"
 
-    else:  # single / blur (contain-blur)
+    else:  # Layout Blur / Single
         zoom = max(params.region_a.zoom, 1) / 10
         pX = min(max(params.region_a.x, 0), 100) / 100
         pY = min(max(params.region_a.y, 0), 100) / 100
 
-        # Fondo: cover de todo el canvas + blur + oscurecido
         filters.append(
             f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
             f"crop={W}:{H},gblur=sigma=20,eq=brightness=-0.35:saturation=1.4[bg]"
         )
 
-        # Frente: crop "contain" con zoom/pan, centrado dentro de video_zone_h
         src_w = round(vW / zoom)
         src_h = round(vH / zoom)
         src_x = round((vW - src_w) * pX)
@@ -227,18 +195,15 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> str:
         src_y = min(max(src_y, 0), vH - src_h)
 
         sf = min(W / vW, video_zone_h / vH)
-        dW = round(vW * sf)
-        dH = round(vH * sf)
+        dW = _make_even(round(vW * sf))
+        dH = _make_even(round(vH * sf))
         dX = round((W - dW) / 2)
         dY = round((video_zone_h - dH) / 2)
 
-        filters.append(
-            f"[0:v]crop={src_w}:{src_h}:{src_x}:{src_y},scale={dW}:{dH}[fg]"
-        )
+        filters.append(f"[0:v]crop={src_w}:{src_h}:{src_x}:{src_y},scale={dW}:{dH}[fg]")
         filters.append(f"[bg][fg]overlay={dX}:{dY}[stacked]")
         last_label = "stacked"
 
-        # Barra de título sólida (solo en modo single)
         if params.show_title and title:
             esc_title = _escape_drawtext(title)
             fontsize = round(62 * (W / 1080))
@@ -247,33 +212,40 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> str:
                 f"color=black@0.9:t=fill[titlebar]"
             )
             filters.append(
-                f"[titlebar]drawtext=fontfile={FONT_PATH}:text='{esc_title}':"
+                f"[titlebar]drawtext=fontfile='{font_arg}':text='{esc_title}':"
                 f"fontsize={fontsize}:fontcolor=white:"
                 f"x=(w-text_w)/2:y={bottom['titleBarY']}+({bottom['titleBarH']}-text_h)/2[titled]"
             )
             last_label = "titled"
 
-    # Badge KICK / streamer (ambos modos)
-    if params.show_badge:
+    # Overlay de Logo (Arriba a la derecha)
+    if has_logo:
+        extra_inputs.append(LOGO_PATH)
+        logo_idx = len(extra_inputs)
+        filters.append(f"[{logo_idx}:v]scale=200:-1[logo_scaled]")
+        filters.append(f"[{last_label}][logo_scaled]overlay=x=W-w-30:y=30[logoed]")
+        last_label = "logoed"
+
+    # Badge KICK / Streamer
+    if params.show_badge and name:
         fontsize = round(38 * (W / 1080))
-        esc_kick = "KICK"
-        esc_name = _escape_drawtext(f" / {name}")
-        # Aproximación de centrado: dibujamos "KICK / NOMBRE" como un solo
-        # texto centrado (el canvas original pinta KICK en verde y el resto
-        # en blanco por separado — acá simplificamos a un solo color por
-        # limitación de drawtext; ver nota más abajo).
         combined = _escape_drawtext(f"KICK / {name}")
         filters.append(
-            f"[{last_label}]drawtext=fontfile={FONT_PATH}:text='{combined}':"
+            f"[{last_label}]drawtext=fontfile='{font_arg}':text='{combined}':"
             f"fontsize={fontsize}:fontcolor=0x53fc18:"
             f"x=(w-text_w)/2:y={bottom['badgeY']}-(text_h/2)[badged]"
         )
         last_label = "badged"
 
-    # Banner (fallback de texto — no tenemos imágenes de banner por
-    # streamer todavía, así que replicamos el fallback: franja oscura +
-    # nombre en verde centrado)
-    if params.show_banner:
+    # Overlay de Banner del Streamer
+    if has_banner:
+        extra_inputs.append(banner_file)
+        banner_idx = len(extra_inputs)
+        filters.append(f"[{banner_idx}:v]scale=1080:-1[banner_scaled]")
+        filters.append(f"[{last_label}][banner_scaled]overlay=x=0:y={bottom['bannerY']}[bannered]")
+        last_label = "bannered"
+    elif params.show_banner and name:
+        # Fallback si no hay imagen de banner
         fontsize = round(48 * (W / 1080))
         esc_name = _escape_drawtext(name)
         filters.append(
@@ -281,7 +253,7 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> str:
             f"color=0x0b1420:t=fill[bannerbg]"
         )
         filters.append(
-            f"[bannerbg]drawtext=fontfile={FONT_PATH}:text='{esc_name}':"
+            f"[bannerbg]drawtext=fontfile='{font_arg}':text='{esc_name}':"
             f"fontsize={fontsize}:fontcolor=0x53fc18:"
             f"x=(w-text_w)/2:y={bottom['bannerY']}+({bottom['bannerH']}-text_h)/2[bannered]"
         )
@@ -289,14 +261,10 @@ def build_filter_complex(params: RenderParams, vW: int, vH: int) -> str:
 
     filters.append(f"[{last_label}]format=yuv420p[vout]")
 
-    return ";\n".join(filters)
+    return ";\n".join(filters), extra_inputs
 
 
 def render_clip(params: RenderParams, output_path: str) -> str:
-    """
-    Pipeline completo: descarga el clip (si es URL), arma el filtro y
-    corre ffmpeg. Devuelve la ruta del archivo final.
-    """
     video_path = params.clip_url
     downloaded_locally = False
 
@@ -310,19 +278,27 @@ def render_clip(params: RenderParams, output_path: str) -> str:
             downloaded_locally = True
 
         vW, vH = _ffprobe_dimensions(video_path)
-        filter_complex = build_filter_complex(params, vW, vH)
+        filter_complex, extra_inputs = build_filter_complex(params, vW, vH)
 
-        cmd = ["ffmpeg", "-y"]
+        # ⚡ -threads 1 previene picos de memoria RAM de FFmpeg en servidores de 512MB
+        cmd = ["ffmpeg", "-y", "-threads", "1"]
+
         if params.trim_start is not None:
             cmd += ["-ss", str(params.trim_start)]
+
         cmd += ["-i", video_path]
+
+        # Añadir inputs de imágenes extras (Logo, Banner)
+        for extra_in in extra_inputs:
+            cmd += ["-i", extra_in]
+
         if params.trim_end is not None and params.trim_start is not None:
             cmd += ["-t", str(max(0.1, params.trim_end - params.trim_start))]
 
         cmd += [
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "22",
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             output_path,
